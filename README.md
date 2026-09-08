@@ -166,3 +166,9 @@ across directories. Without the explicit composite-action directories, the root
 configuration misses their nested third-party pins. New composite actions are
 covered by the glob. See the
 [Dependabot directory and grouping reference](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#directories-or-directory).
+
+Repositories with host-only deployment checks can expose a separate, system-indexed
+CI output and pass `checks-output: ciChecks`. Derive that output from the ordinary
+checks and the deployment component's own check inventory. Keep the host-only
+checks available through `checks` and the existing deployment commands. Missing
+or empty CI outputs fail discovery, and every selected check still must pass.
