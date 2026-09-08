@@ -92,3 +92,14 @@ release. Preserve that distribution during consolidation. New GitHub concurrency
 syntax can exceed the pinned linter's support; ordinary ref-scoped concurrency is
 sufficient here. [Pinned installer metadata](https://github.com/DeterminateSystems/determinate-nix-action/blob/v3.22.3/action.yml),
 [concurrency semantics](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
+
+## Cache pilot result
+
+Two same-revision public framework runs completed after the initial inventory.
+The [cold cached job](https://github.com/nix-forge/nix-config-framework/actions/runs/34249600956)
+took 39 seconds versus 26 uncached. The
+[warm cached job](https://github.com/nix-forge/nix-config-framework/actions/runs/34249747026)
+took 27 seconds versus 29 uncached, restoring a 168,067,585-byte store archive.
+The workload itself dropped from 14 to 4 seconds, but restore/setup overhead
+consumed most of the saving. This two-run sample does not justify enabling the
+store cache by default; the pilot variable remains false.
