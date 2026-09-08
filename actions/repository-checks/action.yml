@@ -1,6 +1,9 @@
 name: Repository checks
 description: Run repository-owned hooks and scan complete history and committed files in one Nix shell.
 inputs:
+  dev-shell:
+    description: Repository development shell containing the hook and scanner tools.
+    default: default
   partitions:
     description: Newline-separated source partitions to materialize before entering the shell.
     default: flake/dev
@@ -20,6 +23,7 @@ runs:
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
+        CHECK_DEV_SHELL: ${{ inputs.dev-shell }}
         CHECK_PARTITIONS: ${{ inputs.partitions }}
         CHECK_HOOK_RUNNER: ${{ inputs.hook-runner }}
         CHECK_HISTORY_BASELINE: ${{ inputs.history-baseline }}
@@ -30,4 +34,4 @@ runs:
             nix store add-path -- "$partition"
           fi
         done <<< "$CHECK_PARTITIONS"
-        nix develop --command bash "$ACTION_PATH/../../scripts/repository-checks.sh"
+        nix develop ".#$CHECK_DEV_SHELL" --command bash "$ACTION_PATH/../../scripts/repository-checks.sh"

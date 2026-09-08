@@ -40,6 +40,10 @@ Nix shell once to run hooks and publication checks. Check out full history with
 committed tree. An optional historical baseline never suppresses current-tree
 findings. Repositories can supply a publication script for stricter local policy.
 These are read-only build steps; do not use them in privileged metadata jobs.
+The optional `dev-shell` input selects a repository shell and defaults to
+`default`. A dedicated hook shell can avoid building product binaries or pulling
+interactive development tools into lint jobs. Keep native product validation in
+the repository's build and integration jobs.
 
 `actions/validate-workflows` runs the library's pinned actionlint, Zizmor,
 Yamllint and consumer contract validator against the caller's workflows, composite
