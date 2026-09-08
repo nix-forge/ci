@@ -4,6 +4,9 @@ inputs:
   system:
     description: Native Nix system supported by this runner.
     required: true
+  checks-output:
+    description: Flake output containing native CI checks, indexed by system.
+    default: checks
   cores:
     description: Build cores per check, with zero selecting all available cores.
     default: '2'
@@ -15,7 +18,8 @@ runs:
       env:
         ACTION_PATH: ${{ github.action_path }}
         TARGET_SYSTEM: ${{ inputs.system }}
+        CHECKS_OUTPUT: ${{ inputs.checks-output }}
         BUILD_CORES: ${{ inputs.cores }}
       run: |
         python3 "$ACTION_PATH/../../scripts/repository_inventory.py" partitions --materialize
-        python3 "$ACTION_PATH/../../scripts/run-flake-checks.py" --system "$TARGET_SYSTEM" --cores "$BUILD_CORES"
+        python3 "$ACTION_PATH/../../scripts/run-flake-checks.py" --system "$TARGET_SYSTEM" --cores "$BUILD_CORES" --output "$CHECKS_OUTPUT"

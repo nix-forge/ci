@@ -130,7 +130,7 @@ class CheckRunnerTests(unittest.TestCase):
         self.log = self.root / "calls.jsonl"
         executable = self.root / "nix"
         executable.write_text(
-            "#!/usr/bin/env python3\n"
+            f"#!{sys.executable}\n"
             "import json, os, sys\n"
             "with open(os.environ['CALL_LOG'], 'a') as log:\n"
             "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
@@ -145,7 +145,7 @@ class CheckRunnerTests(unittest.TestCase):
         )
         executable.chmod(0o755)
 
-    def run_checks(self, names, **extra):
+    def run_checks(self, names, *, output="checks", **extra):
         self.log.unlink(missing_ok=True)
         result = subprocess.run(
             [
@@ -153,6 +153,8 @@ class CheckRunnerTests(unittest.TestCase):
                 str(SCRIPTS / "run-flake-checks.py"),
                 "--system",
                 "x86_64-linux",
+                "--output",
+                output,
             ],
             cwd=self.root,
             check=False,
@@ -166,8 +168,31 @@ class CheckRunnerTests(unittest.TestCase):
             }
             | extra,
         )
-        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        calls = (
+            [json.loads(line) for line in self.log.read_text().splitlines()]
+            if self.log.exists()
+            else []
+        )
         return result, [call for call in calls if call[0] == "build"]
+
+    def test_invalid_output_is_rejected_before_running_nix(self):
+        for output in ["checks.extra", "--impure", "checks;echo unsafe"]:
+            result, builds = self.run_checks(["native"], output=output)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(self.log.exists())
+            self.assertEqual(builds, [])
+
+    def test_repository_owned_output_is_used_for_every_evaluation(self):
+        result, builds = self.run_checks(["native"], output="ciChecks")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(builds), 1)
+        evaluations = [
+            json.loads(line)
+            for line in self.log.read_text().splitlines()
+            if json.loads(line)[0] == "eval"
+        ]
+        self.assertEqual(len(evaluations), 2)
+        self.assertTrue(all(".#ciChecks.x86_64-linux" in call for call in evaluations))
 
     def test_additions_and_deletions_follow_current_outputs(self):
         for names in [["first"], ["first", "added"], ["added"]]:

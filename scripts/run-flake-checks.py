@@ -16,7 +16,7 @@ OPTIONS = [
 ]
 
 
-def check_derivation(system: str, name: str) -> str:
+def check_derivation(system: str, name: str, *, output: str = "checks") -> str:
     """Resolve arbitrary attribute names through Nix, not CLI path quoting."""
     # The outer string is ASCII JSON syntax, also a valid Nix string after
     # escaping interpolation. fromJSON decodes every legal Unicode/control name.
@@ -26,7 +26,15 @@ def check_derivation(system: str, name: str) -> str:
         f"checks: (builtins.getAttr (builtins.fromJSON {literal}) checks).drvPath"
     )
     path = subprocess.check_output(
-        ["nix", "eval", "--raw", *OPTIONS, ".#checks." + system, "--apply", expression],
+        [
+            "nix",
+            "eval",
+            "--raw",
+            *OPTIONS,
+            ".#" + output + "." + system,
+            "--apply",
+            expression,
+        ],
         text=True,
     ).strip()
     if not re.fullmatch(r"/nix/store/[a-z0-9]{32}-[^/\n]+\.drv", path):
@@ -34,11 +42,13 @@ def check_derivation(system: str, name: str) -> str:
     return path
 
 
-def run(system: str, *, cores: int = 2) -> int:
+def run(system: str, *, cores: int = 2, output: str = "checks") -> int:
     """Discover the current check set and report every build failure."""
     if not re.fullmatch(r"[a-zA-Z0-9_-]+", system):
         raise ValueError("Invalid Nix system")
-    selector = ".#checks." + system
+    if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_-]*", output):
+        raise ValueError("Invalid flake check output")
+    selector = ".#" + output + "." + system
     options = OPTIONS
     names = json.loads(
         subprocess.check_output(
@@ -65,7 +75,7 @@ def run(system: str, *, cores: int = 2) -> int:
     for name in sorted(names):
         print(f"::group::Check {name}", flush=True)
         try:
-            target = check_derivation(system, name) + "^*"
+            target = check_derivation(system, name, output=output) + "^*"
         except (subprocess.CalledProcessError, ValueError) as error:
             print(f"Check {name} could not be evaluated: {error}", flush=True)
             failed.append(name)
@@ -98,11 +108,12 @@ def run(system: str, *, cores: int = 2) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--system", required=True)
+    parser.add_argument("--output", default="checks")
     parser.add_argument("--cores", type=int, default=2)
     args = parser.parse_args()
     if args.cores < 0:
         parser.error("--cores must be nonnegative")
-    raise SystemExit(run(args.system, cores=args.cores))
+    raise SystemExit(run(args.system, cores=args.cores, output=args.output))
 
 
 if __name__ == "__main__":
