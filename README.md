@@ -9,7 +9,7 @@ platform build definitions remain in their source repositories.
 | --- | --- | --- |
 | `flake-lock.yml` | `contents: read` | Required `lockfile` input; fails on missing or unhealthy lockfiles |
 | `codeql.yml` | `contents: read`, `security-events: write` | `languages` input; analysis using build-mode none |
-| `dependency-review.yml` | `contents: read` | Optional `base-ref` and `head-ref` for dispatch |
+| `dependency-review.yml` | `contents: read` | Fail on new vulnerabilities at low severity or higher; optional `base-ref` and `head-ref` for dispatch |
 | `request-review.yml` | `pull-requests: write` | Metadata-only `pull_request_target`; human PRs excluding the maintainer |
 | `automerge.yml` | `contents: write`, `pull-requests: write` | Same-repository Dependabot PRs; automation-file changes require human admission |
 | `nur.yml` | `contents: read` | Caller supplies `scripts/check-nur.py` and `tests/nur-supported.nix` |

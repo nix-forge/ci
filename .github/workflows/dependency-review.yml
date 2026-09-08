@@ -23,4 +23,4 @@ jobs:
         with:
           base-ref: ${{ inputs.base-ref }}
           head-ref: ${{ inputs.head-ref }}
-          fail-on-severity: high
+          fail-on-severity: low
