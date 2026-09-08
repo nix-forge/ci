@@ -1,0 +1,41 @@
+name: Set up Nix
+description: Install the tested Nix distribution and optionally cache a bounded store.
+inputs:
+  cache:
+    description: Enable the GitHub cache pilot. No cache publication credentials are used.
+    default: 'false'
+  cache-scope:
+    description: Separate jobs with different build targets.
+    default: build
+outputs:
+  cache-hit:
+    description: Whether a matching store cache was restored.
+    value: ${{ steps.cache.outputs.hit }}
+runs:
+  using: composite
+  steps:
+    - uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614 # v3.22.3
+    - name: Restore Nix store
+      id: cache
+      if: inputs.cache == 'true'
+      uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+      with:
+        primary-key: nix-v1-${{ runner.os }}-${{ runner.arch }}-det-3.22.3-${{ inputs.cache-scope }}-${{ hashFiles('**/flake.lock') }}-${{ github.sha }}
+        restore-prefixes-first-match: nix-v1-${{ runner.os }}-${{ runner.arch }}-det-3.22.3-${{ inputs.cache-scope }}-${{ hashFiles('**/flake.lock') }}-
+        gc-max-store-size: 2G
+        purge: false
+        save: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    - name: Record setup
+      shell: bash
+      env:
+        CACHE_ENABLED: ${{ inputs.cache }}
+        CACHE_HIT: ${{ steps.cache.outputs.hit }}
+        PLATFORM: ${{ runner.os }} / ${{ runner.arch }}
+      run: |
+        {
+          echo '### Nix setup'
+          printf 'Platform: %s\n\n' "$PLATFORM"
+          printf 'Nix: `%s`\n\n' "$(nix --version)"
+          printf 'Cache enabled: %s; restored: %s\n' "$CACHE_ENABLED" "${CACHE_HIT:-false}"
+          printf 'Tested commit: `%s`\n' "$GITHUB_SHA"
+        } >> "$GITHUB_STEP_SUMMARY"

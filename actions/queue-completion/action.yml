@@ -1,0 +1,19 @@
+name: Notify queue completion
+description: Notify the trusted default-branch reconciler after manually dispatched validation.
+runs:
+  using: composite
+  steps:
+    - name: Notify the trusted queue reconciler
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        for attempt in 1 2 3; do
+          if gh workflow run reconcile-merge-queue.yml --ref main -f source_run_id="$GITHUB_RUN_ID"; then
+            exit 0
+          fi
+          echo "::warning::Queue completion notification attempt $attempt failed"
+          sleep 5
+        done
+        exit 1

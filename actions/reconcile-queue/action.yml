@@ -1,0 +1,21 @@
+name: Reconcile merge queue
+description: Admit eligible automation PRs and verify queue validation using API metadata only.
+inputs:
+  workflows:
+    description: JSON array of workflow filenames that must pass.
+    required: true
+  source-run-id:
+    description: Optional dispatch completion notification.
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Reconcile verified queue results
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        QUEUE_WORKFLOWS: ${{ inputs.workflows }}
+        SOURCE_RUN_ID: ${{ inputs.source-run-id }}
+      run: python3 "$ACTION_PATH/../../scripts/reconcile-queue.py"

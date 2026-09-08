@@ -1,0 +1,26 @@
+name: Flake lock health
+on:
+  workflow_call:
+    inputs:
+      lockfile:
+        description: Lockfile relative to the caller repository.
+        type: string
+        required: true
+permissions: {}
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/flake-checker-action@de924abd783455e8429c858962b9e43062d19da1 # v13
+        with:
+          flake-lock-path: ${{ inputs.lockfile }}
+          ignore-missing-flake-lock: false
+          fail-mode: true
+          send-statistics: false
