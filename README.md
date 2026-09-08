@@ -124,3 +124,9 @@ Composite actions preserve existing required job names. Preserve specialized
 builds and Scorecard publication, and validate both PR and merge-group events.
 See [the research and measurements](docs/architecture.md) for the decisions and
 limits of the performance evidence.
+
+Dependabot scans both root workflows and `/actions/*`, grouping each action
+across directories. Without the explicit composite-action directories, the root
+configuration misses their nested third-party pins. New composite actions are
+covered by the glob. See the
+[Dependabot directory and grouping reference](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#directories-or-directory).
