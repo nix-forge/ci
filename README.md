@@ -44,6 +44,13 @@ to 2 GiB before saving, and never requests cache-purge permissions. GC cannot re
 live roots, so the size target is not a hard quota. Measure restore and upload time
 before enabling it broadly. The cache is disabled by default.
 
+This action archives the Nix store. Enable it only for workloads whose entire
+store can be shared with contributors. Fork pull requests can read base-branch
+caches ([GitHub cache access rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)).
+Nix's `allowSubstitutes = false` controls substitution; it does not exclude a path
+from this archive. Keep jobs producing secrets or redistribution-restricted
+outputs uncached.
+
 `actions/reconcile-queue` executes the packaged script from this repository,
 without checking out caller code. Supply the JSON `workflows` list and optional
 `source-run-id`; the workflow grants checks read and actions, contents,
