@@ -437,6 +437,56 @@ class DispatchResultTests(unittest.TestCase):
         self.report()
         self.assertEqual(self.writes, [])
 
+    def test_completed_failed_job_reports_failure(self) -> None:
+        """A failed required job must reject the group instead of timing out."""
+        self.dispatch_run["conclusion"] = "failure"
+        self.current = self.dispatch_run.copy()
+        self.jobs[0]["conclusion"] = "failure"
+        self.report()
+        self.assertEqual(len(self.writes), 1)
+        self.assertEqual(self.writes[0]["state"], "failure")
+        self.assertEqual(self.writes[0]["context"], "Lint")
+        self.assertEqual(self.writes[0]["target_url"], self.jobs[0]["html_url"])
+
+    def test_failure_does_not_wait_for_unrelated_workflow(self) -> None:
+        """Only positive evidence needs the entire configured workflow set."""
+        self.dispatch_run["conclusion"] = "failure"
+        self.current = self.dispatch_run.copy()
+        self.jobs[0]["conclusion"] = "failure"
+        self.other.update(status="in_progress", conclusion=None)
+        self.report()
+        self.assertEqual([write["state"] for write in self.writes], ["failure"])
+
+    def test_failed_run_does_not_promote_its_successful_jobs(self) -> None:
+        """The failure path must never bypass the existing success gate."""
+        self.dispatch_run["conclusion"] = "failure"
+        self.current = self.dispatch_run.copy()
+        self.jobs.append({**self.jobs[0], "name": "Build", "conclusion": "failure"})
+        self.report()
+        self.assertEqual(
+            [(write["context"], write["state"]) for write in self.writes],
+            [("Build", "failure")],
+        )
+
+    def test_stale_failure_is_not_reported_after_rerun(self) -> None:
+        """An old failed attempt must not reject a newly running attempt."""
+        self.dispatch_run["conclusion"] = "failure"
+        self.jobs[0]["conclusion"] = "failure"
+        self.current.update(run_attempt=2, status="in_progress", conclusion=None)
+        self.report()
+        self.assertEqual(self.writes, [])
+
+    def test_cancelled_and_timed_out_jobs_report_failure(self) -> None:
+        """Terminal unsuccessful validation should not block the next PR until timeout."""
+        for conclusion in ["cancelled", "timed_out"]:
+            with self.subTest(conclusion=conclusion):
+                self.writes = []
+                self.dispatch_run["conclusion"] = conclusion
+                self.current = self.dispatch_run.copy()
+                self.jobs[0]["conclusion"] = conclusion
+                self.report()
+                self.assertEqual([write["state"] for write in self.writes], ["failure"])
+
     def test_skipped_or_missing_jobs_never_become_success(self) -> None:
         """A skipped or absent job provides no passing evidence."""
         self.jobs[0]["conclusion"] = "skipped"

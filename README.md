@@ -65,6 +65,12 @@ ref exists; old refs do not satisfy readiness for a different queued commit.
 Empty queues do not wait. Keep scheduled reconciliation as a backup for longer
 GitHub delays; exhaustion emits a warning and never invents passing checks.
 
+Completed failures, timeouts and cancellations from the latest dispatch attempt
+are reported as failures, so they release the queue instead of blocking later
+PRs until timeout. Other workflows need not finish before reporting a verified
+failure. Passing results still require the complete configured workflow set to
+succeed. Missing, skipped and stale evidence never becomes a pass.
+
 The queue fallback remains necessary with current `GITHUB_TOKEN` admission.
 Replacing it requires an installed GitHub App and proof that app-authenticated
 admission produces native merge-group checks. No app key is required for this
