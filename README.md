@@ -59,6 +59,12 @@ mirrors skipped validation as success. `actions/queue-completion` notifies this
 trusted reconciler from dispatched queue runs. Retain the caller's existing
 `Queue completion callback` name and event guard.
 
+After observing a queued bot PR, reconciliation waits up to 55 seconds for the
+live front entry's validation ref. GitHub can acknowledge admission before that
+ref exists; old refs do not satisfy readiness for a different queued commit.
+Empty queues do not wait. Keep scheduled reconciliation as a backup for longer
+GitHub delays; exhaustion emits a warning and never invents passing checks.
+
 The queue fallback remains necessary with current `GITHUB_TOKEN` admission.
 Replacing it requires an installed GitHub App and proof that app-authenticated
 admission produces native merge-group checks. No app key is required for this

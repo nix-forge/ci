@@ -58,15 +58,20 @@ def graphql(query: str, **variables: str) -> dict[str, Any]:
     return result["data"]
 
 
-def admit(pr: dict[str, Any]) -> None:
-    """Admit one eligible PR once its required checks pass."""
+def admit(pr: dict[str, Any]) -> bool:
+    """Admit one eligible PR once its required checks pass.
+
+    Returns:
+        Whether this trusted PR is now queued and may need a validation ref.
+
+    """
     trusted = pr["user"]["login"] == "dependabot[bot]" or (
         REPOSITORY == "nix-forge/nixpkgs-personal"
         and pr["user"]["login"] == "github-actions[bot]"
         and pr["head"]["ref"] == "automation/package-updates"
     )
     if not trusted or pr["draft"] or pr["head"]["repo"]["full_name"] != REPOSITORY:
-        return
+        return False
     number, sha = pr["number"], pr["head"]["sha"]
     # Workflow and privileged automation updates require a human decision.
     page = 1
@@ -81,7 +86,7 @@ def admit(pr: dict[str, Any]) -> None:
             for item in files
         ):
             print(f"PR #{number}: automation changes require maintainer review")
-            return
+            return False
         if len(files) < PAGE_SIZE:
             break
         page += 1
@@ -90,13 +95,13 @@ def admit(pr: dict[str, Any]) -> None:
         id=pr["node_id"],
     )["node"]
     if state["mergeQueueEntry"]:
-        return
+        return True
     # Once admitted, a rejected head needs a fix or deliberate requeue.
     # Never keep rebuilding the same failing merge group indefinitely.
     statuses = api(f"repos/{REPOSITORY}/commits/{sha}/status")["statuses"]
     if any(status["context"] == ADMISSION for status in statuses):
         print(f"PR #{number}: already admitted this head; leave rejection for review")
-        return
+        return False
     checks = subprocess.run(
         [
             GH,
@@ -119,13 +124,13 @@ def admit(pr: dict[str, Any]) -> None:
         checks.check_returncode()
     if checks.returncode in {1, 8}:
         print(f"PR #{number}: required checks are not passing yet")
-        return
+        return False
     checks.check_returncode()
     required = json.loads(checks.stdout)
     if not required or any(
         check["bucket"] not in {"pass", "skipping"} for check in required
     ):
-        return
+        return False
     try:
         graphql(
             "mutation($id:ID!,$sha:GitObjectID!) { enqueuePullRequest(input:"
@@ -138,7 +143,7 @@ def admit(pr: dict[str, Any]) -> None:
         print(
             f"PR #{number}: admission refused: {getattr(error, 'stderr', None) or str(error)}"
         )
-        return
+        return False
     api(
         f"repos/{REPOSITORY}/statuses/{sha}",
         "POST",
@@ -149,6 +154,8 @@ def admit(pr: dict[str, Any]) -> None:
         },
     )
     print(f"PR #{number}: admitted {sha}")
+
+    return True
 
 
 def wait_for_source_run(run_id: str) -> None:
@@ -171,6 +178,25 @@ def wait_for_source_run(run_id: str) -> None:
     print(f"Source run {run_id} is still running; reconcile other ready entries")
 
 
+def front_queue_entry() -> dict[str, Any] | None:
+    """Read the live front entry without assuming the queue ref naming scheme.
+
+    Returns:
+        The entry, whose head may still be pending, or None for an empty queue.
+
+    """
+    owner, name = REPOSITORY.split("/", 1)
+    repository = graphql(
+        "query($owner:String!,$name:String!) { repository(owner:$owner,name:$name) { "
+        'mergeQueue(branch:"main") { entries(first:1) { nodes { headCommit { oid } } } } } }',
+        owner=owner,
+        name=name,
+    )["repository"]
+    merge_queue = repository["mergeQueue"]
+    entries = merge_queue["entries"]["nodes"] if merge_queue else []
+    return entries[0] if entries else None
+
+
 def main() -> None:
     """Reconcile open automation PRs, then start missing queue validation.
 
@@ -181,20 +207,45 @@ def main() -> None:
     wait_for_source_run(os.environ.get("SOURCE_RUN_ID", ""))
 
     # Pagination is bounded by GitHub's repository PR limit, not a waiting loop.
+    queue_expected = False
     page = 1
     while True:
         pulls = api(
             f"repos/{REPOSITORY}/pulls?state=open&base=main&per_page={PAGE_SIZE}&page={page}"
         )
         for pr in pulls:
-            admit(pr)
+            queue_expected = admit(pr) or queue_expected
         if len(pulls) < PAGE_SIZE:
             break
         page += 1
 
     # GITHUB_TOKEN enqueue events do not start merge_group workflows. Explicit
     # dispatch is supported. Discover queue refs and validate their exact SHA.
-    refs = api(f"repos/{REPOSITORY}/git/matching-refs/heads/gh-readonly-queue/main/")
+    # Enqueue acknowledgement can precede ref creation. GITHUB_TOKEN will not
+    # trigger another workflow for us, and scheduled runs can be delayed.
+    for attempt in range(12):
+        refs = api(
+            f"repos/{REPOSITORY}/git/matching-refs/heads/gh-readonly-queue/main/"
+        )
+        if not queue_expected:
+            break
+        # Old refs can linger after a merge. Wait for the live front entry,
+        # not merely any ref in the queue namespace. PRs behind it wait for
+        # its completion callback rather than consuming another polling loop.
+        front = front_queue_entry()
+        if front is None:
+            refs = []
+            break
+        head = front["headCommit"]
+        if head and any(entry["object"]["sha"] == head["oid"] for entry in refs):
+            break
+        if attempt == 11:
+            print(
+                "::warning::Queued PR has no visible validation ref after 55 seconds; "
+                "a later reconciliation must retry discovery"
+            )
+            break
+        time.sleep(5)
     for entry in refs:
         try:
             dispatch_entry(entry)

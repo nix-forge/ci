@@ -90,6 +90,12 @@ class ReconcileTests(unittest.TestCase):
                 queue, "graphql", return_value={"node": {"mergeQueueEntry": None}}
             ) as graphql,
             patch.object(queue.subprocess, "run", return_value=result),
+            patch.object(queue.time, "sleep"),
+            patch.object(
+                queue,
+                "front_queue_entry",
+                return_value={"headCommit": {"oid": "group"}},
+            ),
         ):
             queue.main()
         return graphql
@@ -143,6 +149,82 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(graphql.call_args.kwargs, {"id": "PR_7", "sha": "head"})
         self.assertEqual(self.writes[0][1]["context"], queue.ADMISSION)
 
+    def test_absent_queue_ref_wait_is_bounded(self) -> None:
+        """A delayed or blocked queue must not keep the runner alive indefinitely."""
+        with patch.object(queue.time, "sleep") as sleep:
+            result = subprocess.CompletedProcess([], 0, '[{"bucket":"pass"}]')
+            with (
+                patch.object(queue, "api", side_effect=self.api) as api,
+                patch.object(
+                    queue, "graphql", return_value={"node": {"mergeQueueEntry": None}}
+                ),
+                patch.object(queue.subprocess, "run", return_value=result),
+                patch.object(
+                    queue, "front_queue_entry", return_value={"headCommit": None}
+                ),
+            ):
+                queue.main()
+            self.assertEqual(sleep.call_count, 11)
+            self.assertEqual(
+                sum("matching-refs" in call.args[0] for call in api.call_args_list), 12
+            )
+        self.assertFalse(any(path.endswith("/dispatches") for path, _ in self.writes))
+
+    def test_empty_queue_does_not_wait(self) -> None:
+        """Drafts and untrusted PRs do not justify polling for a queue ref."""
+        self.pr["draft"] = True
+        with (
+            patch.object(queue, "api", side_effect=self.api),
+            patch.object(queue.time, "sleep") as sleep,
+        ):
+            queue.main()
+        sleep.assert_not_called()
+        self.assertEqual(self.writes, [])
+
+    def test_new_admission_waits_for_queue_ref_before_dispatch(self) -> None:
+        """GitHub may acknowledge enqueue before publishing its validation ref."""
+        entry = {
+            "ref": "refs/heads/gh-readonly-queue/main/pr-7-base",
+            "object": {"sha": "group"},
+        }
+        reads = 0
+
+        def delayed_api(path: str, method: str = "GET", data: object = None) -> Any:
+            nonlocal reads
+            if "matching-refs" in path:
+                reads += 1
+                return [] if reads == 1 else [entry]
+            return self.api(path, method, data)
+
+        result = subprocess.CompletedProcess([], 0, '[{"bucket":"pass"}]')
+        with (
+            patch.object(queue, "api", side_effect=delayed_api),
+            patch.object(
+                queue, "graphql", return_value={"node": {"mergeQueueEntry": None}}
+            ),
+            patch.object(queue.subprocess, "run", return_value=result),
+            patch.object(queue.time, "sleep"),
+            patch.object(
+                queue,
+                "front_queue_entry",
+                return_value={"headCommit": {"oid": "group"}},
+            ),
+        ):
+            queue.main()
+        dispatches = [
+            data for path, data in self.writes if path.endswith("/dispatches")
+        ]
+        self.assertEqual(
+            dispatches,
+            [
+                {"ref": "gh-readonly-queue/main/pr-7-base"},
+                {
+                    "ref": "gh-readonly-queue/main/pr-7-base",
+                    "inputs": {"base_ref": "base", "head_ref": "group"},
+                },
+            ],
+        )
+
     def test_missing_merge_group_events_dispatch_exact_queue_commit(self) -> None:
         """Verify missing merge group events dispatch exact queue commit."""
         self.pr["draft"] = True
@@ -158,6 +240,51 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(
             self.writes[1][1]["inputs"], {"base_ref": "base", "head_ref": "group"}
         )
+
+    def test_queue_removed_during_discovery_does_not_dispatch_stale_refs(self) -> None:
+        """Queue cancellation should end discovery without launching obsolete work."""
+        self.refs = [
+            {"ref": "refs/heads/gh-readonly-queue/main/old", "object": {"sha": "old"}}
+        ]
+        with (
+            patch.object(queue, "api", side_effect=self.api),
+            patch.object(queue, "admit", return_value=True),
+            patch.object(queue, "front_queue_entry", return_value=None),
+            patch.object(queue, "dispatch_entry") as dispatch,
+            patch.object(queue.time, "sleep") as sleep,
+        ):
+            queue.main()
+        sleep.assert_not_called()
+        dispatch.assert_not_called()
+
+    def test_old_ref_does_not_hide_delayed_front_entry(self) -> None:
+        """A lingering ref must not satisfy readiness for a different queue head."""
+        old = {"ref": "refs/heads/gh-readonly-queue/main/old", "object": {"sha": "old"}}
+        live = {
+            "ref": "refs/heads/gh-readonly-queue/main/live",
+            "object": {"sha": "group"},
+        }
+        reads = iter([[old], [old, live]])
+
+        def delayed_api(path: str, method: str = "GET", data: object = None) -> Any:
+            if "matching-refs" in path:
+                return next(reads)
+            return self.api(path, method, data)
+
+        with (
+            patch.object(queue, "api", side_effect=delayed_api),
+            patch.object(queue, "admit", return_value=True),
+            patch.object(
+                queue,
+                "front_queue_entry",
+                return_value={"headCommit": {"oid": "group"}},
+            ),
+            patch.object(queue, "dispatch_entry") as dispatch,
+            patch.object(queue.time, "sleep") as sleep,
+        ):
+            queue.main()
+        sleep.assert_called_once_with(5)
+        self.assertIn(unittest.mock.call(live), dispatch.call_args_list)
 
     def test_existing_queue_runs_are_not_duplicated(self) -> None:
         """Verify existing queue runs are not duplicated."""
@@ -186,6 +313,12 @@ class ReconcileTests(unittest.TestCase):
                 ],
             ),
             patch.object(queue.subprocess, "run", return_value=result),
+            patch.object(queue.time, "sleep"),
+            patch.object(
+                queue,
+                "front_queue_entry",
+                return_value={"headCommit": {"oid": "group"}},
+            ),
         ):
             queue.main()
         self.assertEqual(self.writes, [])
