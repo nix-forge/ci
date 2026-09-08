@@ -1,0 +1,33 @@
+name: Repository checks
+description: Run repository-owned hooks and scan complete history and committed files in one Nix shell.
+inputs:
+  partitions:
+    description: Newline-separated source partitions to materialize before entering the shell.
+    default: flake/dev
+  hook-runner:
+    description: Hook executable provided by the repository shell, prek or pre-commit.
+    default: prek
+  history-baseline:
+    description: Optional reviewed Gitleaks history baseline. Never applied to the current tree.
+    default: ''
+  publication-script:
+    description: Optional repository-owned scanner implementing additional publication policy.
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Run hooks and publication checks
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        CHECK_PARTITIONS: ${{ inputs.partitions }}
+        CHECK_HOOK_RUNNER: ${{ inputs.hook-runner }}
+        CHECK_HISTORY_BASELINE: ${{ inputs.history-baseline }}
+        CHECK_PUBLICATION_SCRIPT: ${{ inputs.publication-script }}
+      run: |
+        while IFS= read -r partition; do
+          if [[ -n "$partition" ]]; then
+            nix store add-path -- "$partition"
+          fi
+        done <<< "$CHECK_PARTITIONS"
+        nix develop --command bash "$ACTION_PATH/../../scripts/repository-checks.sh"
