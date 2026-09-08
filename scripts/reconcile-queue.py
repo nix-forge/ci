@@ -365,12 +365,12 @@ def latest_dispatch_jobs(
 
 
 def invalidate_results(
-    ref: str, sha: str, latest: dict[str, Any], successful: set[str] | None = None
+    ref: str, sha: str, latest: dict[str, Any], reported: set[str] | None = None
 ) -> None:
-    """Invalidate old adapter results absent from the latest successful jobs."""
+    """Invalidate old adapter results absent from the latest verified jobs."""
     for status in latest.values():
         if status.get("description", "").startswith("Mirrored queue job") and (
-            successful is None or status["context"] not in successful
+            reported is None or status["context"] not in reported
         ):
             publish_status(
                 ref,
@@ -390,25 +390,42 @@ def publish_dispatch_results(ref: str, sha: str, runs: list[dict[str, Any]]) -> 
     if not dispatched:
         return
     latest = read_statuses(sha)
-    if not workflow_set_passed(sha, runs):
-        invalidate_results(ref, sha, latest)
-        return
-    jobs = latest_dispatch_jobs(sha, dispatched)
+    all_passed = workflow_set_passed(sha, runs)
+    failures = {"failure", "timed_out", "cancelled"}
+    evidence = (
+        dispatched
+        if all_passed
+        else [
+            run
+            for run in dispatched
+            if run["head_sha"] == sha
+            and run["status"] == "completed"
+            and run["conclusion"] in failures
+        ]
+    )
+    # Failure can reject the group before unrelated workflows finish, but a
+    # success still requires the complete configured workflow set to pass.
+    jobs = latest_dispatch_jobs(sha, evidence) if evidence else None
     if not jobs:
         invalidate_results(ref, sha, latest)
         return
-    successful = {job["name"] for job in jobs if job["conclusion"] == "success"}
-    invalidate_results(ref, sha, latest, successful)
+    results = {
+        job["name"]: "success" if job["conclusion"] == "success" else "failure"
+        for job in jobs
+        if job["conclusion"] in failures
+        or (all_passed and job["conclusion"] == "success")
+    }
+    invalidate_results(ref, sha, latest, set(results))
     for job in jobs:
-        # A skipped job is not evidence that validation ran. Never invent a pass.
-        if job["conclusion"] == "success":
+        # Skipped and neutral jobs provide no passing or failing evidence.
+        if job["name"] in results:
             publish_status(
                 ref,
                 sha,
                 latest,
                 {
                     "context": job["name"],
-                    "state": "success",
+                    "state": results[job["name"]],
                     "target_url": job["html_url"],
                 },
             )
@@ -435,9 +452,9 @@ def publish_status(
             "context": name,
             "state": state,
             "target_url": target_url,
-            "description": "Mirrored queue job result"
-            if state == "success"
-            else "Mirrored queue job awaiting validation",
+            "description": "Mirrored queue job awaiting validation"
+            if state == "pending"
+            else "Mirrored queue job result",
         },
     )
     print(f"Reported {name}: {state} for {sha}")
