@@ -25,3 +25,12 @@ jobs:
         run: python3 -m unittest discover -s tests -v
       - name: Check workflow syntax and security
         run: nix develop --command bash scripts/check.sh
+  codeql:
+    name: CodeQL
+    permissions:
+      contents: read
+      security-events: write # Upload the shared automation scan.
+    # Both local syntaxes bind the caller commit; pinned actionlint lacks $/ support.
+    uses: ./.github/workflows/codeql.yml # zizmor: ignore[self-repository]
+    with:
+      languages: python,actions
