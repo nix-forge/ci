@@ -96,8 +96,9 @@ release. Do not provide privileged tokens to PR build steps.
 ## Discovered inputs
 
 `actions/discover-lockfiles` emits a JSON `lockfiles` output for a workflow matrix.
-It reads tracked `flake.lock` files paired with tracked `flake.nix` files in the
-caller repository. Added, renamed and deleted partitions change that inventory
+It requires a tracked `flake.lock` for each tracked `flake.nix` in the caller
+repository. Deleting only the lockfile fails discovery; deleting the entire
+partition removes its matrix entry. Added, renamed and deleted partitions change that inventory
 without edits to the workflow. Submodules own their lockfile health jobs.
 Require a stable aggregate job that waits for the complete matrix and fails for
 any failed, cancelled or skipped matrix. Protect that aggregate instead of

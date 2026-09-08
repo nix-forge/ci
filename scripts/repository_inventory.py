@@ -21,13 +21,15 @@ def tracked_files(root: Path, *, submodules: bool = False) -> list[Path]:
 
 
 def lockfiles(root: Path, *, submodules: bool = False) -> list[str]:
-    """Find lockfiles belonging to tracked flakes."""
+    """Require a tracked lockfile for every tracked flake."""
     files = set(tracked_files(root, submodules=submodules))
-    return sorted(
-        str(path)
-        for path in files
-        if path.name == "flake.lock" and path.with_name("flake.nix") in files
-    )
+    expected = {
+        path.with_name("flake.lock") for path in files if path.name == "flake.nix"
+    }
+    missing = sorted(str(path) for path in expected - files)
+    if missing:
+        raise ValueError("Tracked flakes are missing lockfiles: " + ", ".join(missing))
+    return sorted(str(path) for path in expected)
 
 
 def partitions(root: Path) -> list[str]:

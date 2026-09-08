@@ -52,6 +52,13 @@ class InventoryTests(unittest.TestCase):
         (self.root / "flake.nix").write_text("{}")
         self.assertEqual(lockfiles(self.root), [])
 
+    def test_deleting_only_the_lockfile_fails_discovery(self):
+        self.flake(".")
+        self.flake("nested")
+        self.git("rm", "-f", "nested/flake.lock")
+        with self.assertRaisesRegex(ValueError, "nested/flake.lock"):
+            lockfiles(self.root)
+
     def test_submodule_partitions_without_submodule_root(self):
         self.flake(".")
         self.git(
@@ -128,9 +135,13 @@ class CheckRunnerTests(unittest.TestCase):
             "with open(os.environ['CALL_LOG'], 'a') as log:\n"
             "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
             "if sys.argv[1] == 'eval':\n"
-            "    print(os.environ['CHECK_NAMES'])\n"
-            "    sys.exit(int(os.environ.get('EVAL_STATUS', '0')))\n"
-            "sys.exit(1 if sys.argv[-1].endswith('.\"fail\"') else 0)\n"
+            "    if sys.argv[-1] == 'builtins.attrNames':\n"
+            "        print(os.environ['CHECK_NAMES'])\n"
+            "        sys.exit(int(os.environ.get('EVAL_STATUS', '0')))\n"
+            "    name = 'fail' if 'fail' in sys.argv[-1] else 'pass'\n"
+            "    print('/nix/store/' + 'a' * 32 + '-' + name + '.drv')\n"
+            "    sys.exit(0)\n"
+            "sys.exit(1 if sys.argv[-1].endswith('-fail.drv^*') else 0)\n"
         )
         executable.chmod(0o755)
 
@@ -162,10 +173,9 @@ class CheckRunnerTests(unittest.TestCase):
         for names in [["first"], ["first", "added"], ["added"]]:
             result, builds = self.run_checks(names)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                [json.loads(call[-1].rsplit(".", 1)[1]) for call in builds],
-                sorted(names),
-            )
+            self.assertEqual(len(builds), len(names))
+            for name in names:
+                self.assertIn(f"::group::Check {name}", result.stdout)
 
     def test_one_failed_build_does_not_skip_other_checks(self):
         result, builds = self.run_checks(["after", "fail", "last"])
@@ -189,7 +199,7 @@ class CheckRunnerTests(unittest.TestCase):
         name = "name with spaces;$(touch injected)"
         result, builds = self.run_checks([name])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(builds[0][-1], '.#checks."x86_64-linux".' + json.dumps(name))
+        self.assertEqual(builds[0][-1], "/nix/store/" + "a" * 32 + "-pass.drv^*")
         self.assertFalse((self.root / "injected").exists())
 
 
