@@ -1,0 +1,17 @@
+name: Discover flake lockfiles
+description: List tracked flake lockfiles for a matrix without a second list of partitions.
+outputs:
+  lockfiles:
+    description: JSON array of lockfiles in this repository.
+    value: ${{ steps.discover.outputs.lockfiles }}
+runs:
+  using: composite
+  steps:
+    - id: discover
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        lockfiles=$(python3 "$ACTION_PATH/../../scripts/repository_inventory.py" lockfiles)
+        test "$lockfiles" != '[]'
+        printf 'lockfiles=%s\n' "$lockfiles" >> "$GITHUB_OUTPUT"

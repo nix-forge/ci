@@ -1,9 +1,12 @@
 """Reject real workflow regressions with small consumer fixtures."""
 
 import importlib.util
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 
 spec = importlib.util.spec_from_file_location(
     "contracts", Path(__file__).parents[1] / "scripts/check-workflow-contracts.py"
@@ -64,6 +67,22 @@ class ContractTests(unittest.TestCase):
     def test_mixed_shared_releases(self):
         extra = WORKFLOW.replace(PIN, "b" * 40)
         self.assertTrue(self.check(WORKFLOW, {".github/workflows/second.yml": extra}))
+
+    def test_nested_composites_cannot_escape_pin_validation(self):
+        action = """name: fixture
+description: fixture
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@main
+"""
+        for path in [
+            "actions/new/nested/action.yaml",
+            ".github/actions/new/action.yml",
+        ]:
+            with self.subTest(path=path):
+                errors = self.check(WORKFLOW, {path: action})
+                self.assertTrue(any("full commit SHA" in error for error in errors))
 
     def test_privileged_checkout(self):
         workflow = WORKFLOW.replace("pull_request:", "pull_request_target:")

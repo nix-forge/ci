@@ -1,0 +1,9 @@
+name: Materialize flake partitions
+description: Discover tracked nested flakes, including initialized submodules.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: python3 "$ACTION_PATH/../../scripts/repository_inventory.py" partitions --materialize

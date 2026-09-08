@@ -5,8 +5,8 @@ inputs:
     description: Repository development shell containing the hook and scanner tools.
     default: default
   partitions:
-    description: Newline-separated source partitions to materialize before entering the shell.
-    default: flake/dev
+    description: Auto-discover tracked nested flakes, or provide explicit newline-separated paths.
+    default: auto
   hook-runner:
     description: Hook executable provided by the repository shell, prek or pre-commit.
     default: prek
@@ -29,9 +29,13 @@ runs:
         CHECK_HISTORY_BASELINE: ${{ inputs.history-baseline }}
         CHECK_PUBLICATION_SCRIPT: ${{ inputs.publication-script }}
       run: |
-        while IFS= read -r partition; do
-          if [[ -n "$partition" ]]; then
-            nix store add-path -- "$partition"
-          fi
-        done <<< "$CHECK_PARTITIONS"
+        if [[ "$CHECK_PARTITIONS" == auto ]]; then
+          python3 "$ACTION_PATH/../../scripts/repository_inventory.py" partitions --materialize
+        else
+          while IFS= read -r partition; do
+            if [[ -n "$partition" ]]; then
+              nix store add-path -- "$partition"
+            fi
+          done <<< "$CHECK_PARTITIONS"
+        fi
         nix develop ".#$CHECK_DEV_SHELL" --command bash "$ACTION_PATH/../../scripts/repository-checks.sh"

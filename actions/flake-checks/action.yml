@@ -1,0 +1,21 @@
+name: Native flake checks
+description: Discover and build every native flake check with bounded evaluation memory.
+inputs:
+  system:
+    description: Native Nix system supported by this runner.
+    required: true
+  cores:
+    description: Build cores per check, with zero selecting all available cores.
+    default: '2'
+runs:
+  using: composite
+  steps:
+    - name: Discover and build native checks
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        TARGET_SYSTEM: ${{ inputs.system }}
+        BUILD_CORES: ${{ inputs.cores }}
+      run: |
+        python3 "$ACTION_PATH/../../scripts/repository_inventory.py" partitions --materialize
+        python3 "$ACTION_PATH/../../scripts/run-flake-checks.py" --system "$TARGET_SYSTEM" --cores "$BUILD_CORES"

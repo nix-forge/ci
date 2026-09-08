@@ -8,16 +8,17 @@ import sys
 from pathlib import Path
 
 import yaml
+from repository_inventory import workflow_files
 
 
 def validate(root: Path) -> list[str]:
     """Return actionable policy errors without contacting GitHub."""
     errors = []
     pins = set()
-    workflows = sorted((root / ".github/workflows").glob("*.y*ml"))
-    templates = sorted((root / "workflow-templates").glob("*.y*ml"))
-    actions = sorted(root.glob("actions/*/action.yml"))
-    actions += sorted(root.glob(".github/actions/*/action.yml"))
+    inventory = workflow_files(root)
+    workflows = inventory["workflows"]
+    templates = inventory["templates"]
+    actions = inventory["actions"]
     for path in workflows + templates + actions:
         data = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
         label = str(path.relative_to(root))
