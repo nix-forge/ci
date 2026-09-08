@@ -93,6 +93,37 @@ Replacing it requires an installed GitHub App and proof that app-authenticated
 admission produces native merge-group checks. No app key is required for this
 release. Do not provide privileged tokens to PR build steps.
 
+## Discovered inputs
+
+`actions/discover-lockfiles` emits a JSON `lockfiles` output for a workflow matrix.
+It reads tracked `flake.lock` files paired with tracked `flake.nix` files in the
+caller repository. Added, renamed and deleted partitions change that inventory
+without edits to the workflow. Submodules own their lockfile health jobs.
+Require a stable aggregate job that waits for the complete matrix and fails for
+any failed, cancelled or skipped matrix. Protect that aggregate instead of
+individual lockfile names, so adding coverage cannot be bypassed and deleting a
+partition does not leave an obsolete required status. Migrate existing branch
+rules only after the aggregate has passed on PR and merge-group runs.
+
+`actions/materialize-partitions` discovers nested flakes across the checkout and
+initialized submodules. `actions/repository-checks` now uses this discovery by
+default. Its `partitions` input still accepts explicit newline-separated paths
+when a repository needs a different boundary.
+
+`actions/flake-checks` takes a native `system` and builds every name in
+`checks.<system>`. Each check gets a separate Nix evaluation with one evaluator
+thread and one build job. Build cores default to two and can be configured.
+A failed check does not suppress later checks; the action fails if any fail.
+Failed, malformed or empty discovery cannot accidentally build a default package
+or report success. Register platform availability in the flake that owns the
+check, rather than maintaining a second CI allowlist. This follows the
+[Nix checks contract](https://nix.dev/manual/nix/stable/command-ref/new-cli/nix3-flake-check).
+
+Workflow syntax and policy validation share one inventory, including nested
+composite actions using either `.yml` or `.yaml`. Explicit supported runner maps,
+security expectations, action commit pins and deployment policy remain deliberate
+configuration. Discovery does not change repository permissions or merge rules.
+
 ## Development and releases
 
 ```sh
