@@ -122,11 +122,24 @@ class ReconcileTests(unittest.TestCase):
             ".github/workflows/ci.yml",
             ".github/actions/setup/action.yml",
             ".github/scripts/reconcile-queue.py",
+            "actions/setup-nix/action.yml",
+            "scripts/update-packages.py",
+            "workflow-templates/nix-checks.yml",
         ]:
             with self.subTest(filename=filename):
                 self.changed_files = [{"filename": filename}]
                 self.assertEqual(self.run_queue().call_count, 0)
                 self.assertEqual(self.writes, [])
+
+    def test_renaming_automation_requires_human_admission(self) -> None:
+        self.changed_files = [
+            {
+                "filename": "ordinary.txt",
+                "previous_filename": "actions/setup-nix/action.yml",
+            }
+        ]
+        self.assertEqual(self.run_queue().call_count, 0)
+        self.assertEqual(self.writes, [])
 
     def test_changed_file_api_failure_does_not_enqueue(self) -> None:
         with (

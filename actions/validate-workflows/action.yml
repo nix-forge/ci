@@ -1,0 +1,12 @@
+name: Validate workflows
+description: Apply the shared syntax, security and consumer contracts to workflows and templates.
+runs:
+  using: composite
+  steps:
+    - name: Check automation contracts
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        library=$(realpath "$ACTION_PATH/../..")
+        nix develop "path:$library" --command bash "$library/scripts/check-workflows.sh" "$GITHUB_WORKSPACE"

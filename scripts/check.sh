@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-actionlint
-zizmor --pedantic --offline .github/workflows actions
-yamllint .github actions
+bash scripts/check-workflows.sh
+shellcheck scripts/*.sh
 ruff check scripts tests
 ruff format --check scripts tests
+python3 -m unittest discover -s tests -v

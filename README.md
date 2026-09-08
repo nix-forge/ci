@@ -11,7 +11,6 @@ platform build definitions remain in their source repositories.
 | `codeql.yml` | `contents: read`, `security-events: write` | `languages` input; analysis using build-mode none |
 | `dependency-review.yml` | `contents: read` | Fail on new vulnerabilities at low severity or higher; optional `base-ref` and `head-ref` for dispatch |
 | `request-review.yml` | `pull-requests: write` | Metadata-only `pull_request_target`; human PRs excluding the maintainer |
-| `automerge.yml` | `contents: write`, `pull-requests: write` | Same-repository Dependabot PRs; automation-file changes require human admission |
 | `nur.yml` | `contents: read` | Caller supplies `scripts/check-nur.py` and `tests/nur-supported.nix` |
 
 Call reusable workflows at the job level using a full commit SHA. Callers retain
@@ -34,6 +33,20 @@ Scorecard publication also stays local because its publishing API restricts the
 workflow's steps and OIDC context.
 
 ## Actions
+
+`actions/repository-checks` materializes the caller's partitions, then enters its
+Nix shell once to run hooks and publication checks. Check out full history with
+`fetch-depth: 0`. The default scan checks history and an archive of the complete
+committed tree. An optional historical baseline never suppresses current-tree
+findings. Repositories can supply a publication script for stricter local policy.
+These are read-only build steps; do not use them in privileged metadata jobs.
+
+`actions/validate-workflows` runs the library's pinned actionlint, Zizmor,
+Yamllint and consumer contract validator against the caller's workflows, composite
+actions and onboarding templates. It rejects mutable external references, mixed
+shared releases, persisted checkout credentials, shallow history scans, missing
+queue triggers and callbacks, missing timeouts, broad default permissions and
+incomplete template metadata. Set up Nix before calling either action.
 
 `actions/setup-nix` installs the tested Determinate Nix version. Its optional
 `cache: 'true'` uses GitHub's repository-scoped cache. Give different build jobs
@@ -96,3 +109,18 @@ SHA. Action pins do not automatically pin every downloaded runtime dependency.
 The source is MIT licensed. Third-party actions and Nix packages retain their own
 licenses. The library neither builds the nix-conf desktop closure on hosted
 runners nor publishes package outputs to an external binary cache.
+
+## Version 2 migration
+
+Version 2 removes `automerge.yml`. Remove its consumer wrapper and its name from
+reconciler workflow-run triggers. The existing reconciler owns automatic admission
+after required checks pass. It requires human admission for `.github/`, `actions/`,
+`scripts/` and `workflow-templates/` changes, including rename source paths. This
+leaves one admission policy and avoids a redundant privileged workflow per bot PR.
+Existing immutable version 1 references still resolve to their original contents.
+
+Update every shared reference in one consumer to the same tested release commit.
+Composite actions preserve existing required job names. Preserve specialized
+builds and Scorecard publication, and validate both PR and merge-group events.
+See [the research and measurements](docs/architecture.md) for the decisions and
+limits of the performance evidence.

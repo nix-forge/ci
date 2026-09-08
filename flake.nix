@@ -12,7 +12,7 @@
         let pkgs = import nixpkgs { inherit system; };
         in {
           default = pkgs.mkShell {
-            packages = with pkgs; [ actionlint zizmor yamllint ruff python3 ];
+            packages = with pkgs; [ actionlint zizmor yamllint ruff shellcheck gitleaks (python3.withPackages (p: [ p.pyyaml ])) ];
           };
         }
       );

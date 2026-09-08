@@ -79,12 +79,7 @@ def admit(pr: dict[str, Any]) -> bool:
         files = api(
             f"repos/{REPOSITORY}/pulls/{number}/files?per_page={PAGE_SIZE}&page={page}"
         )
-        if any(
-            item["filename"].startswith(
-                (".github/workflows/", ".github/actions/", ".github/scripts/")
-            )
-            for item in files
-        ):
+        if any(automation_file(item) for item in files):
             print(f"PR #{number}: automation changes require maintainer review")
             return False
         if len(files) < PAGE_SIZE:
@@ -156,6 +151,13 @@ def admit(pr: dict[str, Any]) -> bool:
     print(f"PR #{number}: admitted {sha}")
 
     return True
+
+
+def automation_file(item: dict[str, str]) -> bool:
+    """Require human admission for automation, including rename source paths."""
+    paths = (item["filename"], item.get("previous_filename", ""))
+    prefixes = (".github/", "actions/", "scripts/", "workflow-templates/")
+    return any(path.startswith(prefixes) for path in paths)
 
 
 def wait_for_source_run(run_id: str) -> None:
