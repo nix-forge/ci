@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,7 +21,7 @@ class RepositoryActionTests(unittest.TestCase):
             root = Path(directory)
             executable = root / "nix"
             executable.write_text(
-                "#!/usr/bin/env python3\n"
+                f"#!{sys.executable}\n"
                 "import json, os, sys\n"
                 'with open(os.environ["CALL_LOG"], "a") as output:\n'
                 '    output.write(json.dumps(sys.argv[1:]) + "\\n")\n'

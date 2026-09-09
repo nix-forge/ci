@@ -1,6 +1,9 @@
 """Reject real workflow regressions with small consumer fixtures."""
 
 import importlib.util
+import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -33,6 +36,64 @@ jobs:
 
 
 class ContractTests(unittest.TestCase):
+    def test_action_metadata_extensions(self):
+        action = (
+            "runs:\n  using: composite\n  steps:\n    - uses: example/action@main\n"
+        )
+        for directory in ["actions/example", ".github/actions/example"]:
+            for extension in ["yml", "yaml"]:
+                name = f"{directory}/action.{extension}"
+                with self.subTest(name=name):
+                    errors = self.check(WORKFLOW, {name: action})
+                    self.assertTrue(
+                        any(
+                            name in error and "full commit SHA" in error
+                            for error in errors
+                        )
+                    )
+
+    def test_action_only_repository_reaches_each_validator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            action = root / "actions/example/action.yaml"
+            action.parent.mkdir(parents=True)
+            action.write_text("runs: {using: composite, steps: []}\n")
+            commands = root / "bin"
+            commands.mkdir()
+            log = root / "calls.jsonl"
+            for name in ["actionlint", "zizmor", "yamllint", "contracts"]:
+                executable = commands / name
+                executable.write_text(
+                    f"#!{sys.executable}\n"
+                    "import json, os, sys\n"
+                    'with open(os.environ["CALL_LOG"], "a") as output:\n'
+                    '    output.write(json.dumps(sys.argv) + "\\n")\n'
+                )
+                executable.chmod(0o755)
+            subprocess.run(
+                [
+                    "bash",
+                    str(Path(__file__).parents[1] / "scripts/check-workflows.sh"),
+                    str(root),
+                ],
+                check=True,
+                env=os.environ
+                | {
+                    "PATH": str(commands) + os.pathsep + os.environ["PATH"],
+                    "WORKFLOW_LIBRARY": str(Path(__file__).parents[1]),
+                    "WORKFLOW_CONTRACT_CHECKER": str(commands / "contracts"),
+                    "CALL_LOG": str(log),
+                },
+            )
+            calls = {
+                Path(args[0]).name: args[1:]
+                for args in map(json.loads, log.read_text().splitlines())
+            }
+            self.assertNotIn("actionlint", calls)
+            for name in ["zizmor", "yamllint"]:
+                self.assertIn("actions/example/action.yaml", calls[name])
+            self.assertEqual(calls["contracts"], ["."])
+
     def check(self, workflow, extra=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

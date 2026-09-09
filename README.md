@@ -52,6 +52,10 @@ shared releases, persisted checkout credentials, shallow history scans, missing
 queue triggers and callbacks, missing timeouts, broad default permissions and
 incomplete template metadata. Set up Nix before calling either action.
 
+Validation includes both `action.yml` and `action.yaml` beneath `actions/` and
+`.github/actions/`. Repositories containing only composite actions run the
+applicable action checks without invoking the workflow-only linter.
+
 `actions/setup-nix` installs the tested Determinate Nix version. Its optional
 `cache: 'true'` uses GitHub's repository-scoped cache. Give different build jobs
 different `cache-scope` values. Cache keys include platform, Nix version, lockfiles
@@ -128,9 +132,17 @@ configuration. Discovery does not change repository permissions or merge rules.
 ## Development and releases
 
 ```sh
+nix flake check
+nix run .#validate-workflows -- /path/to/consumer
 nix develop --command bash scripts/check.sh
-python3 -m unittest discover -s tests -v
 ```
+
+`validate-workflows` packages the workflow validators, policy file and Python
+contract checker together. It accepts the consumer repository directory and
+supplies its own tool PATH. The composite action invokes this same package.
+`checks.validation` also runs shell lint, Python lint and the regression suite
+inside the Nix build sandbox. The privileged queue actions retain their
+API-only execution model and do not enter a Nix environment.
 
 Validation covers actionlint, pedantic Zizmor, YAML, Ruff and the consolidated
 queue regression cases. Consumer CI must also pass on PR, merge-group and manual
