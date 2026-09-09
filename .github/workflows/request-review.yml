@@ -11,7 +11,7 @@ jobs:
   request:
     name: request
     if: >-
-      github.event_name == 'pull_request_target' && github.repository_owner == 'nix-forge'
+      github.event_name == 'pull_request_target'
       && github.event.pull_request.user.type != 'Bot'
       && github.event.pull_request.user.login != inputs.reviewer
       && github.event.pull_request.draft == false

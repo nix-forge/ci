@@ -8,9 +8,10 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       run: |
         for attempt in 1 2 3; do
-          if gh workflow run reconcile-merge-queue.yml --ref main -f source_run_id="$GITHUB_RUN_ID"; then
+          if gh workflow run reconcile-merge-queue.yml --ref "$DEFAULT_BRANCH" -f source_run_id="$GITHUB_RUN_ID"; then
             exit 0
           fi
           echo "::warning::Queue completion notification attempt $attempt failed"
