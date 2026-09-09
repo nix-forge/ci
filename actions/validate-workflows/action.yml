@@ -9,4 +9,4 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
       run: |
         library=$(realpath "$ACTION_PATH/../..")
-        nix develop "path:$library" --command bash "$library/scripts/check-workflows.sh" "$GITHUB_WORKSPACE"
+        nix run "path:$library#validate-workflows" -- "$GITHUB_WORKSPACE"

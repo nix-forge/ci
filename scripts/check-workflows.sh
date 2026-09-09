@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-library=$(cd "$(dirname "$0")/.." && pwd)
+library=${WORKFLOW_LIBRARY:-$(cd "$(dirname "$0")/.." && pwd)}
 cd "${1:-.}"
 inventory=$(mktemp -d)
 trap 'rm -rf "$inventory"' EXIT
@@ -16,4 +16,8 @@ if ((${#workflows[@]} + ${#actions[@]})); then
   zizmor --pedantic --offline "${workflows[@]}" "${actions[@]}"
   yamllint -c "$library/.yamllint.yml" "${workflows[@]}" "${actions[@]}"
 fi
-python3 "$library/scripts/check-workflow-contracts.py" .
+if [[ -n ${WORKFLOW_CONTRACT_CHECKER:-} ]]; then
+  "$WORKFLOW_CONTRACT_CHECKER" .
+else
+  python3 "$library/scripts/check-workflow-contracts.py" .
+fi
