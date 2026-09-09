@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: nix-forge/ci/actions/setup-nix@6ddb6f568f93b25a199c1d988c64ba2c2e9a3161 # v2.4.0
+      - uses: nix-forge/ci/actions/setup-nix@78ee44eba73081183f51c85194c6dd9382feb60f # v2.5.0
       - name: Test shared actions and check workflow security
         run: nix flake check --print-build-logs
       - name: Test attribute discovery against real Nix
@@ -47,4 +47,4 @@ jobs:
       actions: write # Notify the trusted default-branch reconciler.
     steps:
       - name: Notify trusted queue reconciler
-        uses: nix-forge/ci/actions/queue-completion@6ddb6f568f93b25a199c1d988c64ba2c2e9a3161 # v2.4.0
+        uses: nix-forge/ci/actions/queue-completion@78ee44eba73081183f51c85194c6dd9382feb60f # v2.5.0
