@@ -13,9 +13,14 @@ import shutil
 import subprocess
 import time
 from typing import Any
+from urllib.parse import quote
 
 REPOSITORY = os.environ["GH_REPO"]
 WORKFLOWS = json.loads(os.environ["QUEUE_WORKFLOWS"])
+DEFAULT_BRANCH = os.environ.get("DEFAULT_BRANCH", "main")
+AUTOMATION_BRANCH = os.environ.get("AUTOMATION_BRANCH", "")
+BASE_SHA_WORKFLOWS = json.loads(os.environ.get("BASE_SHA_WORKFLOWS", "[]"))
+QUEUE_PREFIX = f"refs/heads/gh-readonly-queue/{DEFAULT_BRANCH}/"
 ADMISSION = "Merge queue admission"
 PAGE_SIZE = 100
 GH = shutil.which("gh") or "/usr/bin/gh"
@@ -66,11 +71,15 @@ def admit(pr: dict[str, Any]) -> bool:
 
     """
     trusted = pr["user"]["login"] == "dependabot[bot]" or (
-        REPOSITORY == "nix-forge/nixpkgs-personal"
+        bool(AUTOMATION_BRANCH)
         and pr["user"]["login"] == "github-actions[bot]"
-        and pr["head"]["ref"] == "automation/package-updates"
+        and pr["head"]["ref"] == AUTOMATION_BRANCH
     )
-    if not trusted or pr["draft"] or pr["head"]["repo"]["full_name"] != REPOSITORY:
+    if (
+        not trusted
+        or pr["draft"]
+        or (pr["head"]["repo"] or {}).get("full_name") != REPOSITORY
+    ):
         return False
     number, sha = pr["number"], pr["head"]["sha"]
     # Workflow and privileged automation updates require a human decision.
@@ -189,10 +198,11 @@ def front_queue_entry() -> dict[str, Any] | None:
     """
     owner, name = REPOSITORY.split("/", 1)
     repository = graphql(
-        "query($owner:String!,$name:String!) { repository(owner:$owner,name:$name) { "
-        'mergeQueue(branch:"main") { entries(first:1) { nodes { headCommit { oid } } } } } }',
+        "query($owner:String!,$name:String!,$branch:String!) { repository(owner:$owner,name:$name) { "
+        "mergeQueue(branch:$branch) { entries(first:1) { nodes { headCommit { oid } } } } } }",
         owner=owner,
         name=name,
+        branch=DEFAULT_BRANCH,
     )["repository"]
     merge_queue = repository["mergeQueue"]
     entries = merge_queue["entries"]["nodes"] if merge_queue else []
@@ -213,7 +223,8 @@ def main() -> None:
     page = 1
     while True:
         pulls = api(
-            f"repos/{REPOSITORY}/pulls?state=open&base=main&per_page={PAGE_SIZE}&page={page}"
+            f"repos/{REPOSITORY}/pulls?state=open&base={quote(DEFAULT_BRANCH, safe='')}"
+            f"&per_page={PAGE_SIZE}&page={page}"
         )
         for pr in pulls:
             queue_expected = admit(pr) or queue_expected
@@ -227,7 +238,7 @@ def main() -> None:
     # trigger another workflow for us, and scheduled runs can be delayed.
     for attempt in range(12):
         refs = api(
-            f"repos/{REPOSITORY}/git/matching-refs/heads/gh-readonly-queue/main/"
+            f"repos/{REPOSITORY}/git/matching-refs/{QUEUE_PREFIX.removeprefix('refs/')}"
         )
         if not queue_expected:
             break
@@ -261,7 +272,7 @@ def main() -> None:
 def dispatch_entry(entry: dict[str, Any]) -> None:
     """Start missing workflows for one queue ref if it still exists."""
     ref, sha = entry["ref"], entry["object"]["sha"]
-    if not ref.startswith("refs/heads/gh-readonly-queue/main/"):
+    if not ref.startswith(QUEUE_PREFIX):
         return
     base = api(f"repos/{REPOSITORY}/git/commits/{sha}")["parents"][0]["sha"]
     validation_runs: list[dict[str, Any]] = []
@@ -282,7 +293,7 @@ def dispatch_entry(entry: dict[str, Any]) -> None:
         payload = {"ref": ref.removeprefix("refs/heads/")}
         if workflow == "dependency-review.yml":
             payload["inputs"] = {"base_ref": base, "head_ref": sha}
-        if REPOSITORY == "nix-forge/nixpkgs-personal" and workflow == "ci.yml":
+        if workflow in BASE_SHA_WORKFLOWS:
             payload["inputs"] = {"base_sha": base}
         api(
             f"repos/{REPOSITORY}/actions/workflows/{workflow}/dispatches",

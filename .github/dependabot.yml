@@ -5,6 +5,9 @@ updates:
     schedule:
       interval: weekly
     groups:
+      shared-ci:
+        patterns: ["nix-forge/ci"]
+        group-by: dependency-name
       actions-minor-patch:
         group-by: dependency-name
         patterns: ['*']

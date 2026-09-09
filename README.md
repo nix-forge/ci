@@ -80,6 +80,23 @@ mirrors skipped validation as success. `actions/queue-completion` notifies this
 trusted reconciler from dispatched queue runs. Retain the caller's existing
 `Queue completion callback` name and event guard.
 
+The actions read the default branch from GitHub's repository event metadata.
+Use that same default branch in the caller's callback guard. A package updater
+can opt in to admission with `automation-branch`; it accepts only that exact
+branch from the same repository and the `github-actions[bot]` author. Dependabot
+admission remains enabled. Automation file changes still require human admission.
+Set `base-sha-workflows: '["ci.yml"]'` for a workflow that declares a `base_sha`
+dispatch input. This supplies the queue commit's first parent for derivation
+comparison without teaching the shared library repository names.
+
+Reconcile after pull-request and merge-group validation completes. Dispatched
+queue validation uses its completion callback. Push scans and scheduled security
+scans do not need another reconciliation job. Keep hourly scheduled recovery for
+delayed queue refs or missed callbacks. Reducing the previous three hourly polls
+to one saves 48 scheduled runs per repository per day, while normal queue
+progress remains event-driven. A missed callback can wait until the next hourly
+run, and GitHub can delay scheduled jobs further.
+
 After observing a queued bot PR, reconciliation waits up to 55 seconds for the
 live front entry's validation ref. GitHub can acknowledge admission before that
 ref exists; old refs do not satisfy readiness for a different queued commit.
@@ -172,6 +189,21 @@ Composite actions preserve existing required job names. Preserve specialized
 builds and Scorecard publication, and validate both PR and merge-group events.
 See [the research and measurements](docs/architecture.md) for the decisions and
 limits of the performance evidence.
+
+Use the release-sync command to prepare a rollout across local checkouts:
+
+```sh
+python3 scripts/sync-release.py --check /path/to/consumer /path/to/community
+python3 scripts/sync-release.py /path/to/consumer /path/to/community
+```
+
+It resolves GitHub's latest published stable release to a commit SHA and updates
+workflows, nested composite actions and onboarding templates together. `--check`
+reports drift without writing and exits nonzero when updates are needed. Use
+`--release v2.4.0` for a deliberate rollback to that published release. The command
+does not commit, push or merge. Validate each changed checkout before publication.
+Keep `nix-forge/ci` in its own Dependabot group so unrelated action updates do not
+make the shared release diff harder to review.
 
 Dependabot scans both root workflows and `/actions/*`, grouping each action
 across directories. Without the explicit composite-action directories, the root

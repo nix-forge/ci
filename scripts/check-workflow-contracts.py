@@ -131,11 +131,21 @@ def validate(root: Path) -> list[str]:
                         for term in (
                             "always()",
                             "workflow_dispatch",
-                            "refs/heads/gh-readonly-queue/main/",
+                            "refs/heads/gh-readonly-queue/",
                         )
                     ):
                         errors.append(
                             f"{filename}: callback must be restricted to queue dispatches"
+                        )
+                for filename in json.loads(
+                    step["with"].get("base-sha-workflows", "[]")
+                ):
+                    path = root / ".github/workflows" / filename
+                    workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+                    dispatch = workflow.get("on", {}).get("workflow_dispatch") or {}
+                    if "base_sha" not in dispatch.get("inputs", {}):
+                        errors.append(
+                            f"{filename}: base-sha-workflows requires a base_sha dispatch input"
                         )
     return errors
 

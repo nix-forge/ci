@@ -117,6 +117,59 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(self.run_queue().call_count, 0)
         self.assertEqual(self.writes, [])
 
+    def test_deleted_fork_does_not_abort_reconciliation(self) -> None:
+        self.pr["head"]["repo"] = None
+        self.assertEqual(self.run_queue().call_count, 0)
+        self.assertEqual(self.writes, [])
+
+    def test_package_bot_requires_explicit_branch_opt_in(self) -> None:
+        self.pr["user"]["login"] = "github-actions[bot]"
+        self.pr["head"]["ref"] = "automation/updates"
+        self.assertEqual(self.run_queue().call_count, 0)
+        with patch.object(queue, "AUTOMATION_BRANCH", "automation/updates"):
+            self.assertEqual(self.run_queue().call_count, 2)
+        self.assertEqual(self.writes[0][1]["context"], queue.ADMISSION)
+
+    def test_dispatch_base_sha_is_a_consumer_contract(self) -> None:
+        entry = {
+            "ref": "refs/heads/gh-readonly-queue/main/pr-7-base",
+            "object": {"sha": "group"},
+        }
+        with (
+            patch.object(queue, "api", side_effect=self.api),
+            patch.object(queue, "BASE_SHA_WORKFLOWS", ["ci.yml"]),
+        ):
+            queue.dispatch_entry(entry)
+        self.assertEqual(self.writes[0][1]["inputs"], {"base_sha": "base"})
+
+    def test_default_branch_is_not_assumed(self) -> None:
+        self.pr["draft"] = True
+        entry = {
+            "ref": "refs/heads/gh-readonly-queue/release/stable/pr-7-base",
+            "object": {"sha": "group"},
+        }
+        self.refs = [entry]
+        with (
+            patch.object(queue, "DEFAULT_BRANCH", "release/stable"),
+            patch.object(
+                queue, "QUEUE_PREFIX", "refs/heads/gh-readonly-queue/release/stable/"
+            ),
+            patch.object(queue, "api", side_effect=self.api) as api,
+        ):
+            queue.main()
+        self.assertIn("base=release%2Fstable", api.call_args_list[0].args[0])
+        self.assertEqual(
+            self.writes[0][1]["ref"], entry["ref"].removeprefix("refs/heads/")
+        )
+        with (
+            patch.object(queue, "DEFAULT_BRANCH", "release/stable"),
+            patch.object(
+                queue, "graphql", return_value={"repository": {"mergeQueue": None}}
+            ) as graphql,
+        ):
+            self.assertIsNone(queue.front_queue_entry())
+        self.assertEqual(graphql.call_args.kwargs["branch"], "release/stable")
+
     def test_automation_changes_require_human_admission(self) -> None:
         for filename in [
             ".github/workflows/ci.yml",

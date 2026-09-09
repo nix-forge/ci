@@ -4,6 +4,12 @@ inputs:
   workflows:
     description: JSON array of workflow filenames that must pass.
     required: true
+  automation-branch:
+    description: Optional same-repository github-actions bot branch eligible for admission.
+    default: ''
+  base-sha-workflows:
+    description: JSON array of workflows accepting the base_sha dispatch input.
+    default: '[]'
   source-run-id:
     description: Optional dispatch completion notification.
     default: ''
@@ -16,6 +22,9 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        AUTOMATION_BRANCH: ${{ inputs.automation-branch }}
+        BASE_SHA_WORKFLOWS: ${{ inputs.base-sha-workflows }}
         QUEUE_WORKFLOWS: ${{ inputs.workflows }}
         SOURCE_RUN_ID: ${{ inputs.source-run-id }}
       run: python3 "$ACTION_PATH/../../scripts/reconcile-queue.py"
