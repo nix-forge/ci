@@ -10,6 +10,9 @@ inputs:
   cores:
     description: Build cores per check, with zero selecting all available cores.
     default: '2'
+  base-revision:
+    description: Optional base commit used to skip checks with unchanged derivations.
+    default: ''
 runs:
   using: composite
   steps:
@@ -20,6 +23,11 @@ runs:
         TARGET_SYSTEM: ${{ inputs.system }}
         CHECKS_OUTPUT: ${{ inputs.checks-output }}
         BUILD_CORES: ${{ inputs.cores }}
+        BASE_REVISION: ${{ inputs.base-revision || github.event.inputs.base_sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
       run: |
         python3 "$ACTION_PATH/../../scripts/repository_inventory.py" partitions --materialize
-        python3 "$ACTION_PATH/../../scripts/run-flake-checks.py" --system "$TARGET_SYSTEM" --cores "$BUILD_CORES" --output "$CHECKS_OUTPUT"
+        python3 "$ACTION_PATH/../../scripts/run-flake-checks.py" \
+          --system "$TARGET_SYSTEM" \
+          --cores "$BUILD_CORES" \
+          --output "$CHECKS_OUTPUT" \
+          --base-revision "$BASE_REVISION"
