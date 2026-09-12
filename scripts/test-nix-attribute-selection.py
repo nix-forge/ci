@@ -32,13 +32,14 @@ original = Path.cwd()
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     (root / "names.json").write_text(json.dumps(names))
+    (root / "version.txt").write_text("base")
     (root / "flake.nix").write_text(
         """{
           outputs = { self }: {
             checks.SYSTEM = builtins.listToAttrs (map (name: {
               inherit name;
               value = builtins.derivation {
-                name = "attribute-lookup-fixture";
+                name = "attribute-lookup-fixture-${builtins.readFile ./version.txt}";
                 system = "SYSTEM";
                 builder = "/not-executed";
               };
@@ -48,10 +49,33 @@ with tempfile.TemporaryDirectory() as directory:
     )
     try:
         os.chdir(root)
+        subprocess.run(["git", "init", "--quiet"], check=True)
+        subprocess.run(["git", "config", "user.name", "CI Test"], check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "ci-test@example.invalid"], check=True
+        )
+        subprocess.run(["git", "add", "."], check=True)
+        subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], check=True)
+        base_revision = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip()
+        base_source = checks.resolve_base_source(base_revision)
+
         paths = [checks.check_derivation(system, name) for name in names]
         assert len(set(paths)) == 1
+        assert checks.check_derivation(system, names[0], source=base_source) == paths[0]
+
+        (root / "version.txt").write_text("changed")
+        changed_path = checks.check_derivation(system, names[0])
+        assert changed_path != checks.check_derivation(
+            system, names[0], source=base_source
+        )
+
         # Verify the build selector too, without running a fixture's builder.
-        subprocess.run(["nix", "build", "--dry-run", paths[0] + "^*"], check=True)
+        subprocess.run(["nix", "build", "--dry-run", changed_path + "^*"], check=True)
     finally:
         os.chdir(original)
-print(f"Real Nix resolved all {len(names)} attribute names and the build selector.")
+print(
+    f"Real Nix resolved all {len(names)} attribute names, compared base and changed "
+    "derivations, and accepted the build selector."
+)
