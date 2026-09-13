@@ -98,7 +98,10 @@ class FlakeCheckSelectionTests(unittest.TestCase):
 
         source = FLAKE_CHECKS.resolve_base_source("a" * 40)
 
-        self.assertEqual(source, "git+file:///repo?submodules=1&rev=" + "a" * 40)
+        self.assertEqual(
+            source,
+            "git+file:///repo?shallow=1&submodules=1&rev=" + "a" * 40,
+        )
         self.assertEqual(
             run_command.call_args_list[1].args[0],
             ["git", "fetch", "--no-tags", "--depth=1", "origin", "a" * 40],

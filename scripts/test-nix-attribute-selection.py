@@ -59,6 +59,12 @@ with tempfile.TemporaryDirectory() as directory:
         base_revision = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True
         ).strip()
+        shallow_file = Path(
+            subprocess.check_output(
+                ["git", "rev-parse", "--git-path", "shallow"], text=True
+            ).strip()
+        )
+        shallow_file.write_text(base_revision + "\n")
         base_source = checks.resolve_base_source(base_revision)
 
         paths = [checks.check_derivation(system, name) for name in names]
