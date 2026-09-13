@@ -36,7 +36,7 @@ workflow's steps and OIDC context.
 
 `actions/repository-checks` materializes the caller's partitions, then enters its
 Nix shell once to run hooks and publication checks. Check out full history with
-`fetch-depth: 0`. The default scan checks history and an archive of the complete
+`fetch-depth: 0`. The default scan checks HEAD history and an archive of the complete
 committed tree. An optional historical baseline never suppresses current-tree
 findings. Repositories can supply a publication script for stricter local policy.
 These are read-only build steps; do not use them in privileged metadata jobs.

@@ -1,5 +1,5 @@
 name: Repository checks
-description: Run repository-owned hooks and scan complete history and committed files in one Nix shell.
+description: Run repository-owned hooks and scan HEAD history and committed files in one Nix shell.
 inputs:
   dev-shell:
     description: Repository development shell containing the hook and scanner tools.

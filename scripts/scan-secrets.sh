@@ -15,7 +15,7 @@ if [[ -n ${CHECK_HISTORY_BASELINE:-} ]]; then
   test -f "$CHECK_HISTORY_BASELINE"
   history_args+=(--baseline-path "$CHECK_HISTORY_BASELINE")
 fi
-gitleaks git "${config_args[@]}" --redact --no-banner "${history_args[@]}"
+gitleaks git "${config_args[@]}" --redact --no-banner --log-opts HEAD "${history_args[@]}"
 snapshot=$(mktemp -d)
 trap 'rm -rf "$snapshot"' EXIT
 git archive --format=tar HEAD | tar -xf - -C "$snapshot"

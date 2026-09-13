@@ -45,6 +45,15 @@ class ScanTests(unittest.TestCase):
             (root / "data.txt").write_text("safe\n")
             commit()
             self.assertEqual(scan().returncode, 0)
+            # A full checkout may contain unrelated pull-request branches. Only
+            # the checked-out commit's ancestry belongs to this CI run.
+            git("switch", "-qc", "unrelated")
+            (root / "unrelated.txt").write_text(
+                "FORGE_TEST_" + "ZYXWVUTSRQPONMLK" + "\n"
+            )
+            commit()
+            git("switch", "-q", "main")
+            self.assertEqual(scan().returncode, 0)
             shallow = Path(directory) / "shallow"
             subprocess.run(
                 ["git", "clone", "--quiet", "--depth=1", root.as_uri(), str(shallow)],
