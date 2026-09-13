@@ -73,7 +73,10 @@ def resolve_base_source(revision: str | None) -> str | None:
         ["git", "rev-parse", "--show-toplevel"], text=True
     ).strip()
     return (
-        "git+" + Path(root).resolve().as_uri() + "?submodules=1&rev=" + revision.lower()
+        "git+"
+        + Path(root).resolve().as_uri()
+        + "?shallow=1&submodules=1&rev="
+        + revision.lower()
     )
 
 

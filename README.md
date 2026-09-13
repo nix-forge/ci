@@ -143,7 +143,8 @@ check, rather than maintaining a second CI allowlist. This follows the
 
 On pull requests and merge groups, `actions/flake-checks` compares every current
 check derivation with the event's base commit. The action performs a bounded
-fetch when a shallow checkout does not contain that commit. It skips a build only
+fetch when a shallow checkout does not contain that commit and marks its local
+Git flake URL as shallow for Nix evaluation. It skips a build only
 when both derivation paths are identical. New checks, changed checks, unavailable
 history, and base evaluation failures retain the conservative full-build
 behavior. The optional `base-revision` input overrides event discovery for manual
