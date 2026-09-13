@@ -26,7 +26,7 @@ checkouts. The organization template validator checked syntax and JSON parsing
 without the shared security checks or metadata contracts.
 
 Version 2 consolidates admission in the queue reconciler and validates both paths
-of renames. Repository checks use full history and the current committed tree,
+of renames. Repository checks use the full HEAD history and current committed tree,
 retaining repository-owned scanner exceptions and stricter publication scripts.
 A historical baseline does not exempt a surviving current file. Shared validation
 checks real consumer workflows and paired template metadata. Negative regression
