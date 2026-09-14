@@ -20,8 +20,12 @@ on pull requests and merge-group refs.
 All workflows start with empty default permissions. Reusable workflows document
 their caller permissions, jobs grant only the scopes they need, checkout does
 not persist credentials, and actions use full commit SHAs. Pull requests and
-merge groups run workflow validation, dependency review, CodeQL, and the Python
-and Nix test suites before protected main can advance.
+merge groups run workflow validation, CodeQL, and the Python and Nix test
+suites before protected main can advance. The dependency-review workflow in
+this repository is a reusable caller contract. This repository has no
+GitHub-supported dependency manifest for the action to compare, so its own Nix
+lock and action references are checked by flake validation, Dependabot, the
+workflow contract validator, and CodeQL instead.
 
 The normal evidence set is:
 
@@ -37,10 +41,12 @@ run on pull-request events do not check out or execute pull-request code.
 ## Release and dependency controls
 
 Flake inputs, action pins, workflow contracts, and lockfiles are reviewed with
-their security and compatibility impact. Dependency review blocks new
-low-or-higher severity vulnerabilities. CodeQL and SCA findings must be fixed
-before release unless a reviewed suppression records why the finding is not
-exploitable.
+their security and compatibility impact. Caller repositories use the
+dependency-review workflow to block new low-or-higher severity
+vulnerabilities. This repository's Nix lock and pinned action surface are
+checked by flake validation, Dependabot, and the workflow contract validator.
+CodeQL and SCA findings must be fixed before release unless a reviewed
+suppression records why the finding is not exploitable.
 
 Each source release records the reviewed commit, unique tag, workflow contract
 changes, public inputs and outputs, security impact, release actor and
@@ -67,7 +73,7 @@ are part of the release notes and [SUPPORT.md](../SUPPORT.md).
 | --- | --- |
 | Least-privilege CI and trusted inputs | Empty default permissions, per-job scopes, pinned actions, contract validation, and metadata-only target workflows |
 | Releases and change logs | scripts/sync-release.py, release tags, and release notes |
-| Dependencies | flake.lock, action pins, dependency review, CodeQL, and repository tests |
+| Dependencies | flake.lock, action pins, Dependabot, the reusable dependency-review contract, CodeQL, and repository tests |
 | Build and test instructions | [README.md](../README.md), [CONTRIBUTING.md](../CONTRIBUTING.md), and scripts/check.sh |
 | Governance | [GOVERNANCE.md](../GOVERNANCE.md) |
 | Contributor legal agreement | [DCO](../DCO) and .github/workflows/dco.yml |
