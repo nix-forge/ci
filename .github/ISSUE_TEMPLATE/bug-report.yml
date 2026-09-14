@@ -1,0 +1,36 @@
+name: Bug report
+description: Report a reproducible problem in a shared workflow or action.
+title: "[bug] "
+body:
+  - type: input
+    id: component
+    attributes:
+      label: Workflow, action, or script
+    validations:
+      required: true
+  - type: input
+    id: caller
+    attributes:
+      label: Calling repository and revision
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include the event, inputs, permissions, and relevant public workflow excerpt. Redact secrets and tokens.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and diagnostics
+      description: Include the failed job, redacted logs, and runner or platform details.
+    validations:
+      required: true
