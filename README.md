@@ -1,6 +1,6 @@
 # nix-forge CI
 
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14642/badge)](https://www.bestpractices.dev/en/projects/14642)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14642/baseline)](https://www.bestpractices.dev/en/projects/14642/baseline-1)
 
 Shared workflows and small actions for nix-forge repositories. Package and
 platform build definitions remain in their source repositories.
