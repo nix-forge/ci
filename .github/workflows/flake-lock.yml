@@ -15,6 +15,15 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Validate lockfile input
+        env:
+          LOCKFILE: ${{ inputs.lockfile }}
+        run: |
+          set -euo pipefail
+          if [[ "$LOCKFILE" == /* || "$LOCKFILE" == *..* || ! "$LOCKFILE" =~ ^[A-Za-z0-9._/-]+\.lock$ ]]; then
+            printf 'Invalid lockfile input: %s\n' "$LOCKFILE" >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

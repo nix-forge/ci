@@ -19,6 +19,26 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Validate repository-check inputs
+      shell: bash
+      env:
+        CHECK_DEV_SHELL: ${{ inputs.dev-shell }}
+        CHECK_HOOK_RUNNER: ${{ inputs.hook-runner }}
+        CHECK_PUBLICATION_SCRIPT: ${{ inputs.publication-script }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$CHECK_DEV_SHELL" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+          printf 'Invalid dev-shell input: %s\n' "$CHECK_DEV_SHELL" >&2
+          exit 1
+        fi
+        if [[ "$CHECK_HOOK_RUNNER" != prek && "$CHECK_HOOK_RUNNER" != pre-commit ]]; then
+          printf 'Invalid hook-runner input: %s\n' "$CHECK_HOOK_RUNNER" >&2
+          exit 1
+        fi
+        if [[ -n "$CHECK_PUBLICATION_SCRIPT" && ( "$CHECK_PUBLICATION_SCRIPT" == /* || "$CHECK_PUBLICATION_SCRIPT" == *..* || ! "$CHECK_PUBLICATION_SCRIPT" =~ ^[A-Za-z0-9._/-]+$ ) ]]; then
+          printf 'Invalid publication-script input: %s\n' "$CHECK_PUBLICATION_SCRIPT" >&2
+          exit 1
+        fi
     - name: Run hooks and publication checks
       shell: bash
       env:

@@ -20,6 +20,15 @@ jobs:
     permissions:
       pull-requests: write # Update PR metadata only.
     steps:
+      - name: Validate reviewer input
+        env:
+          REVIEWER: ${{ inputs.reviewer }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REVIEWER" =~ ^[A-Za-z0-9-]{1,39}$ ]]; then
+            printf 'Invalid reviewer input: %s\n' "$REVIEWER" >&2
+            exit 1
+          fi
       - name: Request maintainer review
         env:
           GH_TOKEN: ${{ github.token }}
