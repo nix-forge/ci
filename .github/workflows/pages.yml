@@ -15,6 +15,7 @@ jobs:
   deploy:
     name: Deploy static site
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       pages: write # Required to publish the Pages artifact.
