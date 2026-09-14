@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: publish source release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write # Publish the tagged source release.
+      id-token: write # Authenticate the build attestation.
+      attestations: write # Publish provenance for the source archive.
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create source archive and manifest
+        env:
+          TAG: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          archive="nix-forge-ci-$TAG.tar.gz"
+          git archive --format=tar.gz --prefix="nix-forge-ci-$TAG/" --output="$archive" "$COMMIT"
+          sha256sum "$archive" > "$archive.sha256"
+          {
+            echo "repository=$GITHUB_REPOSITORY"
+            echo "tag=$TAG"
+            echo "commit=$COMMIT"
+            echo "archive=$archive"
+          } > release-manifest.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nix-forge-ci-release
+          path: |
+            nix-forge-ci-*.tar.gz
+            nix-forge-ci-*.sha256
+            release-manifest.txt
+          if-no-files-found: error
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: nix-forge-ci-*.tar.gz
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" nix-forge-ci-* --verify-tag --generate-notes --title "nix-forge CI $TAG"
