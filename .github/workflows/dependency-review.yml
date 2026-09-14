@@ -19,6 +19,25 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Validate dependency-review refs
+        env:
+          BASE_REF: ${{ inputs.base-ref }}
+          HEAD_REF: ${{ inputs.head-ref }}
+        run: |
+          set -euo pipefail
+          validate_ref() {
+            local label="$1"
+            local value="$2"
+            if [[ -z "$value" ]]; then
+              return
+            fi
+            if [[ "$value" == /* || "$value" == -* || "$value" == *..* || "$value" == *//* || ! "$value" =~ ^[A-Za-z0-9._/-]{1,256}$ ]]; then
+              printf 'Invalid %s input: %s\n' "$label" "$value" >&2
+              exit 1
+            fi
+          }
+          validate_ref BASE_REF "$BASE_REF"
+          validate_ref HEAD_REF "$HEAD_REF"
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           base-ref: ${{ inputs.base-ref }}

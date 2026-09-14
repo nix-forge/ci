@@ -16,6 +16,37 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Validate queue inputs
+      shell: bash
+      env:
+        AUTOMATION_BRANCH: ${{ inputs.automation-branch }}
+        BASE_SHA_WORKFLOWS: ${{ inputs.base-sha-workflows }}
+        QUEUE_WORKFLOWS: ${{ inputs.workflows }}
+        SOURCE_RUN_ID: ${{ inputs.source-run-id }}
+      run: |
+        set -euo pipefail
+        if [[ -n "$SOURCE_RUN_ID" && ! "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]; then
+          printf 'Invalid source-run-id input: %s\n' "$SOURCE_RUN_ID" >&2
+          exit 1
+        fi
+        if [[ -n "$AUTOMATION_BRANCH" && ( "$AUTOMATION_BRANCH" == /* || "$AUTOMATION_BRANCH" == *..* || ! "$AUTOMATION_BRANCH" =~ ^[A-Za-z0-9._/-]{1,256}$ ) ]]; then
+          printf 'Invalid automation-branch input: %s\n' "$AUTOMATION_BRANCH" >&2
+          exit 1
+        fi
+        python3 - "$QUEUE_WORKFLOWS" "$BASE_SHA_WORKFLOWS" <<'PY'
+        import json
+        import re
+        import sys
+
+        workflow_pattern = re.compile(r"^[A-Za-z0-9._/-]+\.yml$")
+        for label, value in zip(("workflows", "base-sha-workflows"), sys.argv[1:]):
+            entries = json.loads(value)
+            if not isinstance(entries, list) or not all(
+                isinstance(entry, str) and workflow_pattern.fullmatch(entry)
+                for entry in entries
+            ):
+                raise SystemExit(f"Invalid {label} input")
+        PY
     - name: Reconcile verified queue results
       shell: bash
       env:

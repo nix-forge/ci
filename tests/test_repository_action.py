@@ -16,7 +16,11 @@ ACTION = Path(__file__).parents[1] / "actions/repository-checks"
 class RepositoryActionTests(unittest.TestCase):
     def test_default_and_custom_shell_are_single_arguments(self):
         action = yaml.load((ACTION / "action.yml").read_text(), Loader=yaml.BaseLoader)
-        command = action["runs"]["steps"][0]["run"]
+        command = next(
+            step["run"]
+            for step in action["runs"]["steps"]
+            if step["name"] == "Run hooks and publication checks"
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             executable = root / "nix"
@@ -55,3 +59,21 @@ class RepositoryActionTests(unittest.TestCase):
                     )
                     self.assertEqual(calls[1][3], "bash")
                     self.assertFalse((root / "injected").exists())
+
+    def test_validation_rejects_unsafe_shell(self):
+        action = yaml.load((ACTION / "action.yml").read_text(), Loader=yaml.BaseLoader)
+        command = action["runs"]["steps"][0]["run"]
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", command],
+            check=False,
+            env=os.environ
+            | {
+                "CHECK_DEV_SHELL": "$(touch injected)",
+                "CHECK_HOOK_RUNNER": "prek",
+                "CHECK_PUBLICATION_SCRIPT": "",
+            },
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Invalid dev-shell input", result.stderr)
