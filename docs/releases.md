@@ -7,15 +7,29 @@ repository test suite.
 
 ## Candidate checklist
 
-1. Update the release notes with workflow and action contract changes,
-   migration impact, security changes, and the exact checks that ran.
+1. Create `docs/releases/v2.x.y.md` for the exact tag. It must contain a
+   `## Changelog` section with functional and security changes, affected
+   callers, migration notes, and the checks and support window for the
+   release. The release workflow rejects a tag without this file.
 2. Run nix flake check, scripts/check.sh, and the complete Python test suite.
 3. Run a representative caller repository against the candidate commit.
 4. Run scripts/sync-release.py in check mode for all known callers before
    publishing a new shared release.
 5. Tag the exact reviewed commit. Do not tag a dirty working tree.
-6. Verify the tag, source commit, generated manifest, checksums, and GitHub
-   build attestation before announcing the release.
+6. Verify the release using the commands below before announcing it.
+
+## Verification
+
+For example:
+
+```console
+gh release download v2.x.y --repo nix-forge/ci --dir release-v2.x.y
+(cd release-v2.x.y && sha256sum -c nix-forge-ci-v2.x.y.tar.gz.sha256)
+gh attestation verify release-v2.x.y/nix-forge-ci-v2.x.y.tar.gz --repo nix-forge/ci
+```
+
+The expected release identity is the `nix-forge/ci` repository and its
+reviewed `.github/workflows/release.yml` workflow.
 
 The release workflow creates a source archive, a SHA-256 manifest, and an
 OIDC-backed build attestation. It does not publish opaque compiled assets.
