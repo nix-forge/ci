@@ -26,6 +26,65 @@ class FlakeCheckSelectionTests(unittest.TestCase):
         self.assertIn("github.event.merge_group.base_sha", expression)
         self.assertNotIn("github.event.before", expression)
 
+    def test_action_passes_partition_inputs(self):
+        action = yaml.load(ACTION.read_text(), Loader=yaml.BaseLoader)
+        step = action["runs"]["steps"][0]
+
+        self.assertEqual(
+            step["env"]["PARTITION_COUNT"], "${{ inputs.partition-count }}"
+        )
+        self.assertEqual(
+            step["env"]["PARTITION_INDEX"], "${{ inputs.partition-index }}"
+        )
+        self.assertIn('--partition-count "$PARTITION_COUNT"', step["run"])
+        self.assertIn('--partition-index "$PARTITION_INDEX"', step["run"])
+
+    @mock.patch.object(FLAKE_CHECKS, "check_derivation")
+    @mock.patch.object(FLAKE_CHECKS, "resolve_base_source")
+    @mock.patch.object(FLAKE_CHECKS.subprocess, "run")
+    @mock.patch.object(FLAKE_CHECKS.subprocess, "check_output")
+    def test_partitions_are_disjoint_and_complete(
+        self, check_output, run_command, resolve_base, check_derivation
+    ):
+        names = ["alpha", "bravo", "charlie", "delta", "echo"]
+        check_output.return_value = '["echo", "charlie", "alpha", "delta", "bravo"]'
+        resolve_base.return_value = None
+        check_derivation.side_effect = lambda _system, name, **_kwargs: (
+            f"/nix/store/{'0' * 32}-{name}.drv"
+        )
+        run_command.return_value.returncode = 0
+
+        selected = []
+        for index in range(3):
+            run_command.reset_mock()
+            result = FLAKE_CHECKS.run(
+                "x86_64-linux", partition_count=3, partition_index=index
+            )
+            self.assertEqual(result, 0)
+            selected.append(
+                {
+                    call.args[0][-1]
+                    .removeprefix(f"/nix/store/{'0' * 32}-")
+                    .removesuffix(".drv^*")
+                    for call in run_command.call_args_list
+                    if call.args and call.args[0][0:2] == ["nix", "build"]
+                }
+            )
+
+        self.assertEqual(set.union(*selected), set(names))
+        self.assertFalse(selected[0] & selected[1])
+        self.assertFalse(selected[0] & selected[2])
+        self.assertFalse(selected[1] & selected[2])
+
+    def test_rejects_empty_partition(self):
+        with (
+            mock.patch.object(
+                FLAKE_CHECKS.subprocess, "check_output", return_value='["only"]'
+            ),
+            self.assertRaisesRegex(ValueError, "selects no flake checks"),
+        ):
+            FLAKE_CHECKS.run("x86_64-linux", partition_count=2, partition_index=1)
+
     @mock.patch.object(FLAKE_CHECKS, "check_derivation")
     @mock.patch.object(FLAKE_CHECKS, "resolve_base_source")
     @mock.patch.object(FLAKE_CHECKS.subprocess, "run")

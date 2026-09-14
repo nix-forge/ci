@@ -13,6 +13,12 @@ inputs:
   base-revision:
     description: Optional base commit used to skip checks with unchanged derivations.
     default: ''
+  partition-count:
+    description: Number of deterministic check partitions run by separate jobs.
+    default: '1'
+  partition-index:
+    description: Zero-based partition selected by this job.
+    default: '0'
 runs:
   using: composite
   steps:
@@ -24,10 +30,14 @@ runs:
         CHECKS_OUTPUT: ${{ inputs.checks-output }}
         BUILD_CORES: ${{ inputs.cores }}
         BASE_REVISION: ${{ inputs.base-revision || github.event.inputs.base_sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        PARTITION_COUNT: ${{ inputs.partition-count }}
+        PARTITION_INDEX: ${{ inputs.partition-index }}
       run: |
         python3 "$ACTION_PATH/../../scripts/repository_inventory.py" partitions --materialize
         python3 "$ACTION_PATH/../../scripts/run-flake-checks.py" \
           --system "$TARGET_SYSTEM" \
           --cores "$BUILD_CORES" \
           --output "$CHECKS_OUTPUT" \
-          --base-revision "$BASE_REVISION"
+          --base-revision "$BASE_REVISION" \
+          --partition-count "$PARTITION_COUNT" \
+          --partition-index "$PARTITION_INDEX"
