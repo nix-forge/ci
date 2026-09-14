@@ -37,7 +37,7 @@ jobs:
     with:
       languages: python,actions
   dependency-review:
-    name: dependency-review / review
+    name: dependency-review
     if: github.event_name != 'push'
     permissions:
       contents: read
