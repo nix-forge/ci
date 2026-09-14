@@ -1,0 +1,31 @@
+name: Feature request
+description: Propose an improvement to a shared workflow or action contract.
+title: "[feature] "
+body:
+  - type: input
+    id: component
+    attributes:
+      label: Workflow, action, or script
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: Which callers or maintainers need this capability?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed contract
+      description: Describe inputs, outputs, permissions, events, and compatibility expectations.
+    validations:
+      required: true
+  - type: textarea
+    id: callers
+    attributes:
+      label: Affected callers and rollout plan
+      description: List affected repositories and how the change can be adopted safely.
+    validations:
+      required: true
