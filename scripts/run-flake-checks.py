@@ -86,12 +86,18 @@ def run(
     cores: int = 2,
     output: str = "checks",
     base_revision: str | None = None,
+    partition_count: int = 1,
+    partition_index: int = 0,
 ) -> int:
     """Discover the current check set and report every build failure."""
     if not re.fullmatch(r"[a-zA-Z0-9_-]+", system):
         raise ValueError("Invalid Nix system")
     if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_-]*", output):
         raise ValueError("Invalid flake check output")
+    if partition_count < 1:
+        raise ValueError("Partition count must be positive")
+    if partition_index < 0 or partition_index >= partition_count:
+        raise ValueError("Partition index must be within the partition count")
     selector = ".#" + output + "." + system
     options = OPTIONS
     base_source = resolve_base_source(base_revision)
@@ -116,8 +122,17 @@ def run(
         or len(set(names)) != len(names)
     ):
         raise ValueError("Expected a nonempty, unique list of flake check names")
+    selected_names = sorted(names)[partition_index::partition_count]
+    if not selected_names:
+        raise ValueError("Partition selects no flake checks")
+    if partition_count > 1:
+        print(
+            f"Selected partition {partition_index + 1}/{partition_count}: "
+            + ", ".join(selected_names),
+            flush=True,
+        )
     failed = []
-    for name in sorted(names):
+    for name in selected_names:
         print(f"::group::Check {name}", flush=True)
         try:
             target = check_derivation(system, name, output=output) + "^*"
@@ -174,6 +189,8 @@ def main() -> None:
     parser.add_argument("--output", default="checks")
     parser.add_argument("--cores", type=int, default=2)
     parser.add_argument("--base-revision")
+    parser.add_argument("--partition-count", type=int, default=1)
+    parser.add_argument("--partition-index", type=int, default=0)
     args = parser.parse_args()
     if args.cores < 0:
         parser.error("--cores must be nonnegative")
@@ -183,6 +200,8 @@ def main() -> None:
             cores=args.cores,
             output=args.output,
             base_revision=args.base_revision,
+            partition_count=args.partition_count,
+            partition_index=args.partition_index,
         )
     )
 

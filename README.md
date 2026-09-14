@@ -135,6 +135,11 @@ when a repository needs a different boundary.
 `actions/flake-checks` takes a native `system` and builds every name in
 `checks.<system>`. Each check gets a separate Nix evaluation with one evaluator
 thread and one build job. Build cores default to two and can be configured.
+A caller whose complete native check set exceeds one runner's practical time
+limit can run deterministic, disjoint subsets in parallel. Give each matrix job
+the same `partition-count` and a distinct zero-based `partition-index`; sorted
+check names are assigned round-robin, and an empty partition fails instead of
+silently dropping coverage.
 A failed check does not suppress later checks; the action fails if any fail.
 Failed, malformed or empty discovery cannot accidentally build a default package
 or report success. Register platform availability in the flake that owns the
