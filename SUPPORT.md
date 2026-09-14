@@ -15,3 +15,15 @@ security-sensitive details in a public issue.
 This project does not provide private CI administration or support for
 unreviewed caller changes. A minimal workflow reproducer is the most useful
 support request.
+
+## Release lifecycle
+
+The current `v2.x` release line is supported for shared workflow and action
+contracts. The latest minor release receives normal bug and security fixes; a
+minor release remains supported until two later minor releases have shipped or
+12 months have elapsed since its publication, whichever is later. Critical
+security fixes may require upgrading to the latest supported minor release.
+
+The historical `v1.x` line is end-of-life and does not receive new security
+updates. The release notes record any exception, migration requirement, or
+earlier end-of-life decision for an individual release.
