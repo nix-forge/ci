@@ -33,3 +33,11 @@ default-branch automation and does not check out pull-request code.
 
 Review this model when workflow inputs, token permissions, queue behavior,
 release automation, or cross-repository access changes.
+
+## Review cadence
+
+The maintainers review this model before each source release and whenever a
+workflow contract, permission, dependency, queue, release, or secret-handling
+behavior changes. A release candidate includes an explicit attack-surface
+review and records new trust boundaries and residual risk in its release
+notes. Incidents trigger an out-of-cycle review and a dated follow-up issue.
