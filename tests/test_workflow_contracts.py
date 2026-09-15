@@ -31,6 +31,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - uses: nix-forge/ci/actions/setup-nix@PIN
       - uses: nix-forge/ci/actions/repository-checks@PIN
 """.replace("PIN", PIN)
 
@@ -126,7 +127,10 @@ class ContractTests(unittest.TestCase):
                 self.assertTrue(self.check(WORKFLOW.replace(before, after)))
 
     def test_mixed_shared_releases(self):
-        extra = WORKFLOW.replace(PIN, "b" * 40)
+        extra = WORKFLOW.replace(
+            "nix-forge/ci/actions/setup-nix@" + PIN,
+            "nix-forge/ci/actions/setup-nix@" + "b" * 40,
+        )
         self.assertTrue(self.check(WORKFLOW, {".github/workflows/second.yml": extra}))
 
     def test_slsa_builder_pin_can_coexist_with_shared_release(self):
@@ -135,6 +139,13 @@ class ContractTests(unittest.TestCase):
             "nix-forge/ci/.github/workflows/slsa-source-release.yml@" + "b" * 40,
         )
         self.assertEqual(self.check(WORKFLOW, {".github/workflows/release.yml": builder}), [])
+
+    def test_repository_checks_pin_can_coexist_with_shared_release(self):
+        checks = WORKFLOW.replace(
+            "nix-forge/ci/actions/repository-checks@" + PIN,
+            "nix-forge/ci/actions/repository-checks@" + "b" * 40,
+        )
+        self.assertEqual(self.check(WORKFLOW, {".github/workflows/checks.yml": checks}), [])
 
     def test_nested_composites_cannot_escape_pin_validation(self):
         action = """name: fixture
