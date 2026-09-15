@@ -163,14 +163,18 @@ class ContractTests(unittest.TestCase):
             "nix-forge/ci/actions/repository-checks@" + PIN,
             "nix-forge/ci/.github/workflows/slsa-source-release.yml@" + "b" * 40,
         )
-        self.assertEqual(self.check(WORKFLOW, {".github/workflows/release.yml": builder}), [])
+        self.assertEqual(
+            self.check(WORKFLOW, {".github/workflows/release.yml": builder}), []
+        )
 
     def test_repository_checks_pin_can_coexist_with_shared_release(self):
         checks = WORKFLOW.replace(
             "nix-forge/ci/actions/repository-checks@" + PIN,
             "nix-forge/ci/actions/repository-checks@" + "b" * 40,
         )
-        self.assertEqual(self.check(WORKFLOW, {".github/workflows/checks.yml": checks}), [])
+        self.assertEqual(
+            self.check(WORKFLOW, {".github/workflows/checks.yml": checks}), []
+        )
 
     def test_release_requires_trusted_builder_and_verification(self):
         self.assertEqual(

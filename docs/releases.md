@@ -38,12 +38,13 @@ the digest in this command synchronized with `.github/workflows/release.yml`.
 The reusable builder creates a source archive, a SHA-256 file, a release
 manifest, and an OIDC-backed SLSA build attestation before the protected
 publisher job receives the files. The publisher verifies the exact tag, bytes,
-and signer workflow before creating the GitHub Release. It does not publish
-opaque compiled assets. Release notes name the actor and workflow, list public
-inputs and outputs, describe the security assessment, and state the support
-and end-of-life window. A release stops receiving security updates when its
-support window ends or when the next major contract removes it from the
-supported matrix.
+and signer workflow before creating a draft GitHub Release, then publishes it
+only after all assets are attached. This is required for immutable-release
+repositories. It does not publish opaque compiled assets. Release notes name
+the actor and workflow, list public inputs and outputs, describe the security
+assessment, and state the support and end-of-life window. A release stops
+receiving security updates when its support window ends or when the next major
+contract removes it from the supported matrix.
 
 ## Compatibility
 

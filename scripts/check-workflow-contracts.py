@@ -31,20 +31,19 @@ def validate(root: Path) -> list[str]:
                 return
             if not re.fullmatch(r"[^@]+@[0-9a-f]{40}", value):
                 reject(f"external reference must use a full commit SHA: {value}")
-            if value.startswith("nix-forge/ci/"):
+            if value.startswith("nix-forge/ci/") and not any(
+                marker in value
+                for marker in (
+                    "/actions/repository-checks@",
+                    "/.github/workflows/slsa-",
+                )
+            ):
                 # The repository-checks implementation and trusted SLSA
                 # builders are intentionally pinned independently from the
                 # general shared-action release. This lets callers keep their
                 # CI API stable while validation and release trust boundaries
                 # are reviewed and rolled forward separately.
-                if not any(
-                    marker in value
-                    for marker in (
-                        "/actions/repository-checks@",
-                        "/.github/workflows/slsa-",
-                    )
-                ):
-                    pins.add(value.rsplit("@", 1)[-1])
+                pins.add(value.rsplit("@", 1)[-1])
 
         if path in actions:
             jobs = {"composite": {"steps": data.get("runs", {}).get("steps", [])}}
@@ -71,22 +70,19 @@ def validate(root: Path) -> list[str]:
                 reject(f"{name}: pass only explicitly named secrets")
             if "uses" in job:
                 reference(job["uses"])
-                if str(job["uses"]).startswith(
-                    "nix-forge/ci/.github/workflows/slsa-"
-                ):
+                if str(job["uses"]).startswith("nix-forge/ci/.github/workflows/slsa-"):
                     slsa_builders.append(job["uses"])
                 continue
             if path not in actions and "timeout-minutes" not in job:
                 reject(f"{name}: set an explicit timeout")
             environment = job.get("environment", {})
             environment_name = (
-                environment
-                if isinstance(environment, str)
-                else environment.get("name")
+                environment if isinstance(environment, str) else environment.get("name")
             )
-            if environment_name == "release" and job.get("permissions", {}).get(
-                "contents"
-            ) == "write":
+            if (
+                environment_name == "release"
+                and job.get("permissions", {}).get("contents") == "write"
+            ):
                 release_publisher = True
             steps = job.get("steps", [])
             checkout = None

@@ -27,8 +27,13 @@ Consumers should verify an artifact with the GitHub CLI, for example:
 ```console
 gh attestation verify artifact.tar.gz \
   --repo nix-forge/REPOSITORY \
-  --signer-workflow nix-forge/ci/.github/workflows/slsa-source-release.yml
+  --signer-workflow nix-forge/ci/.github/workflows/slsa-source-release.yml \\
+  --signer-digest bf01ac186602f722c516823520aef97c8670fcb8
 ```
+
+The digest is the reviewed builder commit used by the current release
+workflows. Callers must update it, and their verification documentation, in
+the same change when they roll the builder forward.
 
 This is a SLSA Build track control for named release artifacts. It does not
 make routine test outputs, source files, or a Nix flake itself a Build Level 3

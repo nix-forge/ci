@@ -91,5 +91,6 @@ jobs:
           "release/nix-forge-ci-$TAG.tar.gz"
           "release/nix-forge-ci-$TAG.tar.gz.sha256"
           release/release-manifest.txt
-          --verify-tag --notes-file "docs/releases/$TAG.md"
+          --verify-tag --draft --notes-file "docs/releases/$TAG.md"
           --title "nix-forge CI $TAG"
+          && gh release edit "$TAG" --draft=false
