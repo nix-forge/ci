@@ -1,6 +1,6 @@
 # Shared CI design and validation
 
-Reviewed September 8, 2026 across all seven nix-forge repositories.
+Reviewed September 8, 2026 across the eight nix-forge repositories.
 
 ## Ownership
 
