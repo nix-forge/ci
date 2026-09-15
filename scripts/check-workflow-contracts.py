@@ -62,20 +62,44 @@ def validate(root: Path) -> list[str]:
                     ):
                         reject("required CI cannot use workflow-level path filters")
             jobs = data.get("jobs", {})
+        slsa_builders = []
+        inline_attestation = False
+        verification_script = []
+        release_publisher = False
         for name, job in jobs.items():
             if job.get("secrets") == "inherit":
                 reject(f"{name}: pass only explicitly named secrets")
             if "uses" in job:
                 reference(job["uses"])
+                if str(job["uses"]).startswith(
+                    "nix-forge/ci/.github/workflows/slsa-"
+                ):
+                    slsa_builders.append(job["uses"])
                 continue
             if path not in actions and "timeout-minutes" not in job:
                 reject(f"{name}: set an explicit timeout")
+            environment = job.get("environment", {})
+            environment_name = (
+                environment
+                if isinstance(environment, str)
+                else environment.get("name")
+            )
+            if environment_name == "release" and job.get("permissions", {}).get(
+                "contents"
+            ) == "write":
+                release_publisher = True
             steps = job.get("steps", [])
             checkout = None
             for step in steps:
                 uses = step.get("uses", "")
                 if uses:
                     reference(uses)
+                    if uses.startswith(
+                        ("actions/attest@", "actions/attest-build-provenance@")
+                    ):
+                        inline_attestation = True
+                if step.get("run"):
+                    verification_script.append(str(step["run"]))
                 if uses.startswith("actions/checkout@"):
                     checkout = step.get("with", {})
                     if checkout.get("persist-credentials") != "false":
@@ -90,6 +114,34 @@ def validate(root: Path) -> list[str]:
                 and ({"pull_request_target", "workflow_run"} & set(data.get("on", {})))
             ):
                 reject(f"{name}: privileged metadata workflows must not check out code")
+        push = data.get("on", {}).get("push", {})
+        if (
+            path not in actions
+            and path.name == "release.yml"
+            and isinstance(push, dict)
+            and push.get("tags")
+        ):
+            if len(slsa_builders) != 1:
+                reject(
+                    "tagged releases must call exactly one pinned nix-forge/ci SLSA builder"
+                )
+            if inline_attestation:
+                reject(
+                    "tagged releases must attest in the reusable builder, not in the caller"
+                )
+            if not release_publisher:
+                reject(
+                    "tagged releases need a release-environment publisher with contents: write"
+                )
+            verification = "\n".join(verification_script)
+            for term in (
+                "gh attestation verify",
+                "--signer-workflow",
+                "--signer-digest",
+                "--source-ref",
+            ):
+                if term not in verification:
+                    reject(f"tagged release publisher must verify {term}")
         if path in templates:
             metadata = path.with_suffix(".properties.json")
             if not metadata.exists():
