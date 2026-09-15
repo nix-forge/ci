@@ -11,12 +11,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SLSA_BUILDER_SHA: bf01ac186602f722c516823520aef97c8670fcb8
+  SLSA_BUILDER_SHA: da90bfbbb18cfa1ceb176d55d2a1c3cd3e6b1049
 
 jobs:
   build:
     name: build and attest source release
-    uses: nix-forge/ci/.github/workflows/slsa-source-release.yml@bf01ac186602f722c516823520aef97c8670fcb8 # reviewed SLSA builder
+    uses: nix-forge/ci/.github/workflows/slsa-source-release.yml@da90bfbbb18cfa1ceb176d55d2a1c3cd3e6b1049 # reviewed SLSA builder
     with:
       project_name: nix-forge-ci
       release_notes_directory: docs/releases
