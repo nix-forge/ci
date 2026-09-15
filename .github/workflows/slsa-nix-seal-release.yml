@@ -1,0 +1,116 @@
+name: SLSA nix-seal release builder
+
+on:
+  workflow_call:
+    inputs:
+      system:
+        description: Supported nix-seal target system.
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  build:
+    name: build and attest ${{ inputs.system }}
+    runs-on: ${{ inputs.system == 'x86_64-linux' && 'ubuntu-24.04' || inputs.system == 'aarch64-linux' && 'ubuntu-24.04-arm' || inputs.system == 'aarch64-darwin' && 'macos-26' || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write # Request a short-lived Sigstore signing identity.
+      attestations: write # Publish provenance to GitHub's attestation store.
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      SOURCE_COMMIT: ${{ github.sha }}
+      TARGET_SYSTEM: ${{ inputs.system }}
+    steps:
+      - name: Validate release inputs
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          case "$TARGET_SYSTEM" in
+            x86_64-linux|aarch64-linux|aarch64-darwin) ;;
+            *)
+              printf 'Unsupported nix-seal system: %s\n' "$TARGET_SYSTEM" >&2
+              exit 1
+              ;;
+          esac
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+          persist-credentials: false
+      - name: Confirm the tag resolves to the workflow commit
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          [[ "$tag_commit" == "$SOURCE_COMMIT" ]]
+      - name: Set up Nix without a shared release cache
+        uses: nix-forge/ci/actions/setup-nix@b5ec655589b52df24c9b38d20a6b4bf364ec35cc # v2.5.4
+        with:
+          cache: 'false'
+          cache-scope: release-build
+      - name: Build the reproducible Nix package
+        run: nix build --print-build-logs ".#packages.${TARGET_SYSTEM}.nix-seal"
+      - name: Stage executable
+        env:
+          BINARY_NAME: nix-seal-${{ github.ref_name }}-${{ inputs.system }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp result/bin/nix-seal "dist/$BINARY_NAME"
+          chmod 0755 "dist/$BINARY_NAME"
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: result
+          format: cyclonedx-json
+          output-file: dist/nix-seal-${{ github.ref_name }}-${{ inputs.system }}.cdx.json
+      - name: Record checksums and build metadata
+        env:
+          BINARY_NAME: nix-seal-${{ github.ref_name }}-${{ inputs.system }}
+          SBOM_NAME: nix-seal-${{ github.ref_name }}-${{ inputs.system }}.cdx.json
+          BUILD_INFO_NAME: nix-seal-${{ github.ref_name }}-${{ inputs.system }}.build-info
+          CHECKSUM_NAME: nix-seal-${{ github.ref_name }}-${{ inputs.system }}.sha256
+        run: |
+          set -euo pipefail
+          lock_sha256="$(sha256sum flake.lock | awk '{print $1}')"
+          {
+            printf 'repository=%s\n' "$GITHUB_REPOSITORY"
+            printf 'source_ref=%s\n' "$GITHUB_REF"
+            printf 'source_commit=%s\n' "$SOURCE_COMMIT"
+            printf 'tag=%s\n' "$RELEASE_TAG"
+            printf 'system=%s\n' "$TARGET_SYSTEM"
+            printf 'package_attribute=%s\n' "packages.$TARGET_SYSTEM.nix-seal"
+            printf 'runner=%s/%s\n' "$RUNNER_OS" "$RUNNER_ARCH"
+            printf 'nix=%s\n' "$(nix --version)"
+            printf 'flake_lock_sha256=%s\n' "$lock_sha256"
+            printf 'builder_workflow=%s\n' 'nix-forge/ci/.github/workflows/slsa-nix-seal-release.yml'
+            printf 'provenance_predicate=%s\n' 'https://slsa.dev/provenance/v1'
+          } > "dist/$BUILD_INFO_NAME"
+          (
+            cd dist
+            sha256sum "$BINARY_NAME" "$SBOM_NAME" "$BUILD_INFO_NAME" > "$CHECKSUM_NAME"
+          )
+      - name: Create SLSA build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/nix-seal-${{ github.ref_name }}-${{ inputs.system }}
+            dist/nix-seal-${{ github.ref_name }}-${{ inputs.system }}.cdx.json
+            dist/nix-seal-${{ github.ref_name }}-${{ inputs.system }}.build-info
+            dist/nix-seal-${{ github.ref_name }}-${{ inputs.system }}.sha256
+      - name: Attest the generated SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/nix-seal-${{ github.ref_name }}-${{ inputs.system }}
+          sbom-path: dist/nix-seal-${{ github.ref_name }}-${{ inputs.system }}.cdx.json
+      - name: Upload release inputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nix-seal-slsa-release-${{ inputs.system }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 7

@@ -31,7 +31,33 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - uses: nix-forge/ci/actions/setup-nix@PIN
       - uses: nix-forge/ci/actions/repository-checks@PIN
+""".replace("PIN", PIN)
+RELEASE_WORKFLOW = """name: Release
+on:
+  push:
+    tags: ["v*.*.*"]
+permissions: {}
+jobs:
+  build:
+    uses: nix-forge/ci/.github/workflows/slsa-source-release.yml@PIN
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - run: |
+          gh attestation verify artifact \\
+            --signer-workflow builder \\
+            --signer-digest PIN \\
+            --source-ref refs/tags/v1.0.0
 """.replace("PIN", PIN)
 
 
@@ -126,8 +152,60 @@ class ContractTests(unittest.TestCase):
                 self.assertTrue(self.check(WORKFLOW.replace(before, after)))
 
     def test_mixed_shared_releases(self):
-        extra = WORKFLOW.replace(PIN, "b" * 40)
+        extra = WORKFLOW.replace(
+            "nix-forge/ci/actions/setup-nix@" + PIN,
+            "nix-forge/ci/actions/setup-nix@" + "b" * 40,
+        )
         self.assertTrue(self.check(WORKFLOW, {".github/workflows/second.yml": extra}))
+
+    def test_slsa_builder_pin_can_coexist_with_shared_release(self):
+        builder = WORKFLOW.replace(
+            "nix-forge/ci/actions/repository-checks@" + PIN,
+            "nix-forge/ci/.github/workflows/slsa-source-release.yml@" + "b" * 40,
+        )
+        self.assertEqual(
+            self.check(WORKFLOW, {".github/workflows/release.yml": builder}), []
+        )
+
+    def test_repository_checks_pin_can_coexist_with_shared_release(self):
+        checks = WORKFLOW.replace(
+            "nix-forge/ci/actions/repository-checks@" + PIN,
+            "nix-forge/ci/actions/repository-checks@" + "b" * 40,
+        )
+        self.assertEqual(
+            self.check(WORKFLOW, {".github/workflows/checks.yml": checks}), []
+        )
+
+    def test_release_requires_trusted_builder_and_verification(self):
+        self.assertEqual(
+            self.check(WORKFLOW, {".github/workflows/release.yml": RELEASE_WORKFLOW}),
+            [],
+        )
+        without_builder = RELEASE_WORKFLOW.replace(
+            "nix-forge/ci/.github/workflows/slsa-source-release.yml@" + PIN,
+            "nix-forge/ci/actions/setup-nix@" + PIN,
+        )
+        self.assertTrue(
+            any(
+                "exactly one pinned" in error
+                for error in self.check(
+                    WORKFLOW, {".github/workflows/release.yml": without_builder}
+                )
+            )
+        )
+        with_inline_attestation = RELEASE_WORKFLOW.replace(
+            "      - run:",
+            "      - uses: actions/attest@" + PIN + "\n      - run:",
+        )
+        self.assertTrue(
+            any(
+                "attest in the reusable builder" in error
+                for error in self.check(
+                    WORKFLOW,
+                    {".github/workflows/release.yml": with_inline_attestation},
+                )
+            )
+        )
 
     def test_nested_composites_cannot_escape_pin_validation(self):
         action = """name: fixture

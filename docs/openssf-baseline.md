@@ -9,7 +9,8 @@ queue reconciliation, release automation, and repository tests.
 nix-forge CI publishes reusable GitHub Actions workflows and small actions. It
 has source releases in the v2.x series. A release is created from reviewed main
 with an immutable unique tag and a change log. The release represents workflow
-contracts and source actions, not compiled binary assets.
+contracts and source actions, not compiled binary assets. The trusted builder
+and verification contract are documented in [docs/slsa.md](slsa.md).
 
 ## Change and build controls
 
