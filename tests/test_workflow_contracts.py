@@ -129,6 +129,13 @@ class ContractTests(unittest.TestCase):
         extra = WORKFLOW.replace(PIN, "b" * 40)
         self.assertTrue(self.check(WORKFLOW, {".github/workflows/second.yml": extra}))
 
+    def test_slsa_builder_pin_can_coexist_with_shared_release(self):
+        builder = WORKFLOW.replace(
+            "nix-forge/ci/actions/repository-checks@" + PIN,
+            "nix-forge/ci/.github/workflows/slsa-source-release.yml@" + "b" * 40,
+        )
+        self.assertEqual(self.check(WORKFLOW, {".github/workflows/release.yml": builder}), [])
+
     def test_nested_composites_cannot_escape_pin_validation(self):
         action = """name: fixture
 description: fixture

@@ -32,7 +32,12 @@ def validate(root: Path) -> list[str]:
             if not re.fullmatch(r"[^@]+@[0-9a-f]{40}", value):
                 reject(f"external reference must use a full commit SHA: {value}")
             if value.startswith("nix-forge/ci/"):
-                pins.add(value.rsplit("@", 1)[-1])
+                # The trusted SLSA builders are intentionally pinned
+                # independently from the general shared-action release. This
+                # lets callers keep their CI API release stable while the
+                # release builder is reviewed and rolled forward separately.
+                if "/.github/workflows/slsa-" not in value:
+                    pins.add(value.rsplit("@", 1)[-1])
 
         if path in actions:
             jobs = {"composite": {"steps": data.get("runs", {}).get("steps", [])}}
