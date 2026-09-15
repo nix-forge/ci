@@ -10,20 +10,35 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  SLSA_BUILDER_SHA: bf01ac186602f722c516823520aef97c8670fcb8
+
 jobs:
-  source:
+  build:
+    name: build and attest source release
+    uses: nix-forge/ci/.github/workflows/slsa-source-release.yml@bf01ac186602f722c516823520aef97c8670fcb8 # reviewed SLSA builder
+    with:
+      project_name: nix-forge-ci
+      release_notes_directory: docs/releases
+    permissions:
+      contents: read # Read the tagged source for the release archive.
+      id-token: write # Request a short-lived Sigstore signing identity.
+      attestations: write # Publish provenance to GitHub's attestation store.
+  publish:
     name: publish source release
+    needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: release
     permissions:
-      contents: write # Publish the tagged source release.
-      id-token: write # Authenticate the build attestation.
-      attestations: write # Publish provenance for the source archive.
+      actions: read # Download the immutable builder output.
+      contents: write # Publish the verified tagged release.
     steps:
       - name: Check out the tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
           persist-credentials: false
       - name: Validate release metadata
         env:
@@ -31,46 +46,50 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          notes="docs/releases/${TAG}.md"
+          notes="docs/releases/$TAG.md"
           test -s "$notes"
           grep -q '^## Changelog$' "$notes"
-      - name: Create source archive and manifest
+      - name: Download the builder output
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nix-forge-ci-slsa-release
+          path: release
+      - name: Verify release bytes and provenance
         env:
+          GH_TOKEN: ${{ github.token }}
+          SLSA_BUILDER_SHA: ${{ env.SLSA_BUILDER_SHA }}
           TAG: ${{ github.ref_name }}
-          COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
-          archive="nix-forge-ci-$TAG.tar.gz"
-          git archive --format=tar.gz --prefix="nix-forge-ci-$TAG/" --output="$archive" "$COMMIT"
-          sha256sum "$archive" > "$archive.sha256"
-          archive_sha256="$(awk '{print $1}' "$archive.sha256")"
-          {
-            echo "repository=$GITHUB_REPOSITORY"
-            echo "tag=$TAG"
-            echo "commit=$COMMIT"
-            echo "archive=$archive"
-            echo "archive_sha256=$archive_sha256"
-            echo "release_notes=docs/releases/$TAG.md"
-          } > release-manifest.txt
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: nix-forge-ci-release
-          path: |
-            nix-forge-ci-*.tar.gz
-            nix-forge-ci-*.sha256
-            release-manifest.txt
-          if-no-files-found: error
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: |
-            nix-forge-ci-*.tar.gz
-            nix-forge-ci-*.sha256
-            release-manifest.txt
-      - name: Publish the release
+          archive="release/nix-forge-ci-$TAG.tar.gz"
+          checksum="$archive.sha256"
+          manifest="release/release-manifest.txt"
+          test -s "$archive"
+          test -s "$checksum"
+          test -s "$manifest"
+          sha256sum -c "$checksum"
+          grep -Fx "repository=$GITHUB_REPOSITORY" "$manifest"
+          grep -Fx "source_ref=$GITHUB_REF" "$manifest"
+          grep -Fx "source_commit=$GITHUB_SHA" "$manifest"
+          grep -Fx "archive=$(basename "$archive")" "$manifest"
+          grep -Fx "builder_workflow=nix-forge/ci/.github/workflows/slsa-source-release.yml" "$manifest"
+          tag_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          [[ "$tag_commit" == "$GITHUB_SHA" ]]
+          for subject in "$archive" "$checksum" "$manifest"; do
+            gh attestation verify "$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow nix-forge/ci/.github/workflows/slsa-source-release.yml \
+              --signer-digest "$SLSA_BUILDER_SHA" \
+              --source-ref "$GITHUB_REF"
+          done
+      - name: Publish the verified release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: >-
-          gh release create "$TAG" nix-forge-ci-* release-manifest.txt
+          gh release create "$TAG"
+          "release/nix-forge-ci-$TAG.tar.gz"
+          "release/nix-forge-ci-$TAG.tar.gz.sha256"
+          release/release-manifest.txt
           --verify-tag --notes-file "docs/releases/$TAG.md"
           --title "nix-forge CI $TAG"
