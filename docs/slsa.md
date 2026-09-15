@@ -28,7 +28,7 @@ Consumers should verify an artifact with the GitHub CLI, for example:
 gh attestation verify artifact.tar.gz \
   --repo nix-forge/REPOSITORY \
   --signer-workflow nix-forge/ci/.github/workflows/slsa-source-release.yml \\
-  --signer-digest bf01ac186602f722c516823520aef97c8670fcb8
+  --signer-digest da90bfbbb18cfa1ceb176d55d2a1c3cd3e6b1049
 ```
 
 The digest is the reviewed builder commit used by the current release
