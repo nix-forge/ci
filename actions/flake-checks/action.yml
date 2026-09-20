@@ -13,6 +13,9 @@ inputs:
   base-revision:
     description: Optional base commit used to skip checks with unchanged derivations.
     default: ''
+  base-eval-timeout:
+    description: Seconds allowed for each base-revision check evaluation before building the current check; zero disables the limit.
+    default: '60'
   partition-count:
     description: Number of deterministic check partitions run by separate jobs.
     default: '1'
@@ -33,6 +36,7 @@ runs:
         CHECKS_OUTPUT: ${{ inputs.checks-output }}
         BUILD_CORES: ${{ inputs.cores }}
         BASE_REVISION: ${{ inputs.base-revision || github.event.inputs.base_sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        BASE_EVAL_TIMEOUT: ${{ inputs.base-eval-timeout }}
         PARTITION_COUNT: ${{ inputs.partition-count }}
         PARTITION_INDEX: ${{ inputs.partition-index }}
         WEIGHTS_FILE: ${{ inputs.weights-file }}
@@ -47,6 +51,7 @@ runs:
           --cores "$BUILD_CORES" \
           --output "$CHECKS_OUTPUT" \
           --base-revision "$BASE_REVISION" \
+          --base-eval-timeout "$BASE_EVAL_TIMEOUT" \
           --partition-count "$PARTITION_COUNT" \
           --partition-index "$PARTITION_INDEX" \
           "${arguments[@]}"

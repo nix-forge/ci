@@ -18,6 +18,14 @@ ACTION = Path(__file__).parents[1] / "actions/flake-checks/action.yml"
 
 
 class FlakeCheckSelectionTests(unittest.TestCase):
+    @mock.patch.object(FLAKE_CHECKS.subprocess, "check_output")
+    def test_derivation_evaluation_applies_timeout(self, check_output):
+        check_output.return_value = "/nix/store/" + "0" * 32 + "-check.drv\n"
+
+        FLAKE_CHECKS.check_derivation("x86_64-linux", "check", timeout=30)
+
+        self.assertEqual(check_output.call_args.kwargs["timeout"], 30)
+
     def test_action_passes_pull_request_and_merge_group_bases(self):
         action = yaml.load(ACTION.read_text(), Loader=yaml.BaseLoader)
         expression = action["runs"]["steps"][0]["env"]["BASE_REVISION"]
@@ -42,6 +50,15 @@ class FlakeCheckSelectionTests(unittest.TestCase):
         self.assertIn('--partition-index "$PARTITION_INDEX"', step["run"])
         self.assertEqual(step["env"]["WEIGHTS_FILE"], "${{ inputs.weights-file }}")
         self.assertIn('arguments+=(--weights "$WEIGHTS_FILE")', step["run"])
+
+    def test_action_bounds_base_evaluation(self):
+        action = yaml.load(ACTION.read_text(), Loader=yaml.BaseLoader)
+        step = action["runs"]["steps"][0]
+        self.assertEqual(action["inputs"]["base-eval-timeout"]["default"], "60")
+        self.assertEqual(
+            step["env"]["BASE_EVAL_TIMEOUT"], "${{ inputs.base-eval-timeout }}"
+        )
+        self.assertIn('--base-eval-timeout "$BASE_EVAL_TIMEOUT"', step["run"])
 
     def test_weighted_partitions_balance_a_heavy_check(self):
         from ci_partitioning import partition_names
@@ -110,8 +127,8 @@ class FlakeCheckSelectionTests(unittest.TestCase):
         check_output.return_value = '["changed", "unchanged"]'
         resolve_base.return_value = "git+file:///repo?rev=" + "a" * 40
 
-        def derivation(_system, name, *, output="checks", source="."):
-            del output
+        def derivation(_system, name, *, output="checks", source=".", timeout=None):
+            del output, timeout
             revision = "base" if source.startswith("git+") else "head"
             if name == "unchanged":
                 revision = "same"
@@ -149,6 +166,32 @@ class FlakeCheckSelectionTests(unittest.TestCase):
         result = FLAKE_CHECKS.run("x86_64-linux", base_revision="a" * 40)
 
         self.assertEqual(result, 0)
+        self.assertTrue(
+            any(
+                call.args and call.args[0][0:2] == ["nix", "build"]
+                for call in run_command.call_args_list
+            )
+        )
+
+    @mock.patch.object(FLAKE_CHECKS, "check_derivation")
+    @mock.patch.object(FLAKE_CHECKS, "resolve_base_source")
+    @mock.patch.object(FLAKE_CHECKS.subprocess, "run")
+    @mock.patch.object(FLAKE_CHECKS.subprocess, "check_output")
+    def test_slow_base_evaluation_builds_current_check(
+        self, check_output, run_command, resolve_base, check_derivation
+    ):
+        check_output.return_value = '["check"]'
+        resolve_base.return_value = "git+file:///repo?rev=" + "a" * 40
+        check_derivation.side_effect = [
+            "/nix/store/" + "0" * 32 + "-check-head.drv",
+            subprocess.TimeoutExpired(["nix", "eval"], 60),
+        ]
+        run_command.return_value.returncode = 0
+
+        result = FLAKE_CHECKS.run("x86_64-linux", base_revision="a" * 40)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(check_derivation.call_args_list[1].kwargs["timeout"], 60)
         self.assertTrue(
             any(
                 call.args and call.args[0][0:2] == ["nix", "build"]
