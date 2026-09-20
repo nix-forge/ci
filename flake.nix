@@ -52,6 +52,20 @@
             };
             text = builtins.readFile ./scripts/check-workflows.sh;
           };
+          mkdocs = pkgs.python3.withPackages (p: [ p.mkdocs ]);
+          documentationSite =
+            pkgs.runCommand "nix-forge-ci-documentation-site"
+              {
+                nativeBuildInputs = [ mkdocs ];
+              }
+              ''
+                cp -R ${./docs} docs
+                cp -R ${./site} site
+                chmod -R u+w docs
+                mkdocs build --config-file site/mkdocs.yml --site-dir "$out" --strict
+                test -s "$out/index.html"
+                test -s "$out/search/search_index.json"
+              '';
           tooling = [
             pkgs.actionlint
             pkgs.zizmor
@@ -68,23 +82,32 @@
         {
           packages = {
             validate-workflows = validator;
+            documentation-site = documentationSite;
             default = validator;
           };
-          checks.validation =
-            pkgs.runCommand "ci-validation"
-              {
-                nativeBuildInputs = tooling;
-                WORKFLOW_LIBRARY = toString policy;
-                WORKFLOW_CONTRACT_CHECKER = lib.getExe contracts;
-              }
-              ''
-                cp -R ${source}/. .
-                chmod -R u+w .
-                export PYTHONDONTWRITEBYTECODE=1
-                bash scripts/check.sh
-                touch "$out"
-              '';
-          devShells.default = pkgs.mkShellNoCC { packages = tooling; };
+          checks = {
+            validation =
+              pkgs.runCommand "ci-validation"
+                {
+                  nativeBuildInputs = tooling;
+                  WORKFLOW_LIBRARY = toString policy;
+                  WORKFLOW_CONTRACT_CHECKER = lib.getExe contracts;
+                }
+                ''
+                  cp -R ${source}/. .
+                  chmod -R u+w .
+                  export PYTHONDONTWRITEBYTECODE=1
+                  bash scripts/check.sh
+                  touch "$out"
+                '';
+          }
+          // lib.optionalAttrs (system == "x86_64-linux") {
+            documentation-site = documentationSite;
+          };
+          devShells = {
+            default = pkgs.mkShellNoCC { packages = tooling; };
+            docs = pkgs.mkShellNoCC { packages = [ mkdocs ]; };
+          };
         }
       );
     in

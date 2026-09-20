@@ -1,39 +1,59 @@
-name: Deploy Pages
-
+name: Documentation
 on:
   push:
     branches: [main]
+    paths:
+      - ".github/workflows/pages.yml"
+      - "docs/**"
+      - "site/**"
+      - "flake.lock"
+      - "flake.nix"
   workflow_dispatch:
-
 permissions: {}
-
 concurrency:
   group: pages
   cancel-in-progress: false
-
 jobs:
-  deploy:
-    name: Deploy static site
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  build:
+    name: Build documentation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read
-      pages: write # Required to publish the Pages artifact.
-      id-token: write # Required by GitHub Pages for deployment authentication.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: nix-forge/ci/actions/setup-nix@b5ec655589b52df24c9b38d20a6b4bf364ec35cc # v2.5.4
+        with:
+          cache: "false"
+          cache-scope: documentation
+      - name: Build documentation
+        run: nix build --no-link --print-out-paths .#documentation-site > site-path
+      - name: Materialize documentation
+        run: cp -RL "$(cat site-path)" site-output
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site-output
+  deploy:
+    name: Deploy documentation
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read # Download the artifact produced by the build job.
+      contents: read
+      pages: write # Publish the Pages artifact.
+      id-token: write # Authenticate the Pages deployment with OIDC.
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Configure Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-      - name: Upload site artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        with:
-          path: docs
-      - name: Deploy to GitHub Pages
+      - name: Deploy documentation
         id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
