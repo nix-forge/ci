@@ -164,7 +164,10 @@ Git flake URL as shallow for Nix evaluation. It skips a build only
 when both derivation paths are identical. New checks, changed checks, unavailable
 history, and base evaluation failures retain the conservative full-build
 behavior. The optional `base-revision` input overrides event discovery for manual
-dispatches.
+dispatches. Each base check evaluation has a 60-second limit by default; a
+timeout builds the current check instead of waiting on historical evaluation.
+Set `base-eval-timeout` to zero only when complete comparison is worth an
+unbounded wait.
 
 Workflow syntax and policy validation share one inventory, including nested
 composite actions using either `.yml` or `.yaml`. Explicit supported runner maps,

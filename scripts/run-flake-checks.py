@@ -20,7 +20,12 @@ OPTIONS = [
 
 
 def check_derivation(
-    system: str, name: str, *, output: str = "checks", source: str = "."
+    system: str,
+    name: str,
+    *,
+    output: str = "checks",
+    source: str = ".",
+    timeout: int | None = None,
 ) -> str:
     """Resolve arbitrary attribute names through Nix, not CLI path quoting."""
     # The outer string is ASCII JSON syntax, also a valid Nix string after
@@ -41,6 +46,7 @@ def check_derivation(
             expression,
         ],
         text=True,
+        timeout=timeout,
     ).strip()
     if not re.fullmatch(r"/nix/store/[a-z0-9]{32}-[^/\n]+\.drv", path):
         raise ValueError("Check evaluation did not return a Nix derivation path")
@@ -88,6 +94,7 @@ def run(
     cores: int = 2,
     output: str = "checks",
     base_revision: str | None = None,
+    base_eval_timeout: int = 60,
     partition_count: int = 1,
     partition_index: int = 0,
     weights_path: Path | None = None,
@@ -101,6 +108,8 @@ def run(
         raise ValueError("Partition count must be positive")
     if partition_index < 0 or partition_index >= partition_count:
         raise ValueError("Partition index must be within the partition count")
+    if base_eval_timeout < 0:
+        raise ValueError("Base evaluation timeout must be nonnegative")
     selector = ".#" + output + "." + system
     options = OPTIONS
     base_source = resolve_base_source(base_revision)
@@ -157,9 +166,17 @@ def run(
         if base_source is not None:
             try:
                 base_target = check_derivation(
-                    system, name, output=output, source=base_source
+                    system,
+                    name,
+                    output=output,
+                    source=base_source,
+                    timeout=base_eval_timeout or None,
                 )
-            except (subprocess.CalledProcessError, ValueError) as error:
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+                ValueError,
+            ) as error:
                 print(
                     f"Base check {name} could not be evaluated; rebuilding: {error}",
                     flush=True,
@@ -202,6 +219,7 @@ def main() -> None:
     parser.add_argument("--output", default="checks")
     parser.add_argument("--cores", type=int, default=2)
     parser.add_argument("--base-revision")
+    parser.add_argument("--base-eval-timeout", type=int, default=60)
     parser.add_argument("--partition-count", type=int, default=1)
     parser.add_argument("--partition-index", type=int, default=0)
     parser.add_argument("--weights", type=Path)
@@ -214,6 +232,7 @@ def main() -> None:
             cores=args.cores,
             output=args.output,
             base_revision=args.base_revision,
+            base_eval_timeout=args.base_eval_timeout,
             partition_count=args.partition_count,
             partition_index=args.partition_index,
             weights_path=args.weights,
