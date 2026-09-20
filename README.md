@@ -146,6 +146,11 @@ limit can run deterministic, disjoint subsets in parallel. Give each matrix job
 the same `partition-count` and a distinct zero-based `partition-index`; sorted
 check names are assigned round-robin, and an empty partition fails instead of
 silently dropping coverage.
+When check costs differ substantially, a caller can pass a `weights-file` path
+to a JSON file with a positive `default` number and optional `weights` mapping
+from check names to positive relative costs. The action then assigns heavier
+checks first to the least-loaded partition. The weights stay with the caller so
+its CI can tune them without changing the shared action.
 A failed check does not suppress later checks; the action fails if any fail.
 Failed, malformed or empty discovery cannot accidentally build a default package
 or report success. Register platform availability in the flake that owns the
