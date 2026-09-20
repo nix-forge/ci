@@ -32,5 +32,5 @@ large generated artifacts.
 Commits should include a sign-off with `git commit -s`. This records agreement
 to the [Developer Certificate of Origin](https://developercertificate.org/).
 
-Submit changes as pull requests against `main`. The protected branch requires
-review, passing checks, and the merge queue before changes are accepted.
+Submit changes as pull requests against `main`. The maintainer decides whether
+the review is sufficient; passing checks and the merge queue are required.
