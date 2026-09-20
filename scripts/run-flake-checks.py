@@ -8,6 +8,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from ci_partitioning import load_weights, partition_load, partition_names
+
 OPTIONS = [
     "--option",
     "eval-cores",
@@ -88,6 +90,7 @@ def run(
     base_revision: str | None = None,
     partition_count: int = 1,
     partition_index: int = 0,
+    weights_path: Path | None = None,
 ) -> int:
     """Discover the current check set and report every build failure."""
     if not re.fullmatch(r"[a-zA-Z0-9_-]+", system):
@@ -122,7 +125,17 @@ def run(
         or len(set(names)) != len(names)
     ):
         raise ValueError("Expected a nonempty, unique list of flake check names")
-    selected_names = sorted(names)[partition_index::partition_count]
+    if weights_path is None:
+        selected_names = sorted(names)[partition_index::partition_count]
+    else:
+        default_weight, weights = load_weights(weights_path)
+        selected_names = partition_names(
+            names, partition_count, default_weight=default_weight, weights=weights
+        )[partition_index]
+        print(
+            f"Estimated partition load: {partition_load(selected_names, default_weight=default_weight, weights=weights):g}",
+            flush=True,
+        )
     if not selected_names:
         raise ValueError("Partition selects no flake checks")
     if partition_count > 1:
@@ -191,6 +204,7 @@ def main() -> None:
     parser.add_argument("--base-revision")
     parser.add_argument("--partition-count", type=int, default=1)
     parser.add_argument("--partition-index", type=int, default=0)
+    parser.add_argument("--weights", type=Path)
     args = parser.parse_args()
     if args.cores < 0:
         parser.error("--cores must be nonnegative")
@@ -202,6 +216,7 @@ def main() -> None:
             base_revision=args.base_revision,
             partition_count=args.partition_count,
             partition_index=args.partition_index,
+            weights_path=args.weights,
         )
     )
 

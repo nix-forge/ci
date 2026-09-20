@@ -2,6 +2,7 @@
 
 import importlib.util
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -9,6 +10,7 @@ from unittest import mock
 import yaml
 
 SCRIPT = Path(__file__).parents[1] / "scripts/run-flake-checks.py"
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("flake_checks", SCRIPT)
 FLAKE_CHECKS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(FLAKE_CHECKS)
@@ -38,6 +40,19 @@ class FlakeCheckSelectionTests(unittest.TestCase):
         )
         self.assertIn('--partition-count "$PARTITION_COUNT"', step["run"])
         self.assertIn('--partition-index "$PARTITION_INDEX"', step["run"])
+        self.assertEqual(step["env"]["WEIGHTS_FILE"], "${{ inputs.weights-file }}")
+        self.assertIn('arguments+=(--weights "$WEIGHTS_FILE")', step["run"])
+
+    def test_weighted_partitions_balance_a_heavy_check(self):
+        from ci_partitioning import partition_names
+
+        partitions = partition_names(
+            ["heavy", "light-a", "light-b", "light-c"],
+            2,
+            weights={"heavy": 10},
+        )
+        self.assertEqual(partitions[0], ["heavy"])
+        self.assertEqual(partitions[1], ["light-a", "light-b", "light-c"])
 
     @mock.patch.object(FLAKE_CHECKS, "check_derivation")
     @mock.patch.object(FLAKE_CHECKS, "resolve_base_source")
