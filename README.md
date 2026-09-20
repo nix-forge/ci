@@ -7,6 +7,8 @@
 Shared workflows and small actions for nix-forge repositories. Package and
 platform build definitions remain in their source repositories.
 
+[Read the workflow architecture and migration guide](https://nix-forge.github.io/ci/).
+
 ## Shared workflows
 
 | Workflow | Caller permissions | Contract |
