@@ -36,6 +36,7 @@ nav:
   - OpenSSF baseline: openssf-baseline.md
   - Releases: releases.md
   - Release runbook: releases/README.md
+  - v2.8.0 release notes: releases/v2.8.0.md
   - v2.7.0 release notes: releases/v2.7.0.md
   - v2.6.0 release notes: releases/v2.6.0.md
   - Secret management: secret-management.md
