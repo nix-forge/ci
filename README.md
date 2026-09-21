@@ -3,6 +3,7 @@
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14642/baseline)](https://www.bestpractices.dev/en/projects/14642/baseline-3)
 [![OpenSSF Developer Best Practices](https://www.bestpractices.dev/projects/14642/badge)](https://www.bestpractices.dev/en/projects/14642/passing)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/nix-forge/ci/badge)](https://scorecard.dev/viewer/?uri=github.com/nix-forge/ci)
+[![SLSA status](https://img.shields.io/badge/SLSA-status-blue)](https://github.com/nix-forge/.github/blob/main/docs/slsa.md)
 
 Shared workflows and small actions for nix-forge repositories. Package and
 platform build definitions remain in their source repositories.
