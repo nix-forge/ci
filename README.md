@@ -42,6 +42,22 @@ workflow's steps and OIDC context.
 
 ## Actions
 
+`actions/fuzz-atheris` runs a bounded Atheris campaign against an existing
+`fuzz/*.py` file in the checked-out caller. The caller retains its event triggers,
+required job name, checkout, permissions, runner, and any target-specific setup
+such as Nix. The action pins Python setup and Atheris, rejects paths outside the
+top-level `fuzz/` directory, limits the campaign to 600 seconds and each input to
+120 seconds, and uploads crashing inputs for seven days on failure. Its defaults
+are Python 3.12, a 180-second campaign, and a 10-second input timeout. Repositories
+that use Python 3.14 or invoke Nix during fuzzing set `python-version: '3.14'` or
+`input-timeout: '60'` respectively. Call the action at a full tested commit SHA:
+
+```yaml
+- uses: nix-forge/ci/actions/fuzz-atheris@RELEASE_COMMIT_SHA
+  with:
+    target: fuzz/target_fuzzer.py
+```
+
 `actions/repository-checks` materializes the caller's partitions, then enters its
 Nix shell once to run hooks and publication checks. Check out full history with
 `fetch-depth: 0`. The default scan checks HEAD history and an archive of the complete
