@@ -1,18 +1,14 @@
 name: Fuzz CI partitioning
-
 on:
   pull_request:
   schedule:
     - cron: '43 8 * * 1'
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
   group: fuzz-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   partitioning:
     runs-on: ubuntu-latest
