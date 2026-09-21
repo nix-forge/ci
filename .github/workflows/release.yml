@@ -63,9 +63,11 @@ jobs:
           set -euo pipefail
           archive="release/nix-forge-ci-$TAG.tar.gz"
           checksum="$archive.sha256"
+          provenance="release/nix-forge-ci-$TAG.intoto.jsonl"
           manifest="release/release-manifest.txt"
           test -s "$archive"
           test -s "$checksum"
+          test -s "$provenance"
           test -s "$manifest"
           # The checksum names the archive by basename; both files are under
           # release/ after download-artifact, not in the checkout root.
@@ -80,6 +82,7 @@ jobs:
           for subject in "$archive" "$checksum" "$manifest"; do
             gh attestation verify "$subject" \
               --repo "$GITHUB_REPOSITORY" \
+              --bundle "$provenance" \
               --signer-workflow nix-forge/ci/.github/workflows/slsa-source-release.yml \
               --signer-digest "$SLSA_BUILDER_SHA" \
               --source-ref "$GITHUB_REF"
@@ -92,6 +95,7 @@ jobs:
           gh release create "$TAG"
           "release/nix-forge-ci-$TAG.tar.gz"
           "release/nix-forge-ci-$TAG.tar.gz.sha256"
+          "release/nix-forge-ci-$TAG.intoto.jsonl"
           release/release-manifest.txt
           --verify-tag --draft --notes-file "docs/releases/$TAG.md"
           --title "nix-forge CI $TAG"

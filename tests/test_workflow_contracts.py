@@ -54,7 +54,7 @@ jobs:
       contents: write
     steps:
       - run: |
-          gh attestation verify artifact \\
+          gh attestation verify artifact --bundle artifact.intoto.jsonl \\
             --signer-workflow builder \\
             --signer-digest PIN \\
             --source-ref refs/tags/v1.0.0
@@ -203,6 +203,18 @@ class ContractTests(unittest.TestCase):
                 for error in self.check(
                     WORKFLOW,
                     {".github/workflows/release.yml": with_inline_attestation},
+                )
+            )
+        )
+        without_portable_provenance = RELEASE_WORKFLOW.replace(
+            " --bundle artifact.intoto.jsonl", ""
+        )
+        self.assertTrue(
+            any(
+                ".intoto.jsonl" in error
+                for error in self.check(
+                    WORKFLOW,
+                    {".github/workflows/release.yml": without_portable_provenance},
                 )
             )
         )

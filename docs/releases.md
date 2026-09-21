@@ -27,6 +27,7 @@ gh release download v2.x.y --repo nix-forge/ci --dir release-v2.x.y
 (cd release-v2.x.y && sha256sum -c nix-forge-ci-v2.x.y.tar.gz.sha256)
 gh attestation verify release-v2.x.y/nix-forge-ci-v2.x.y.tar.gz \
   --repo nix-forge/ci \
+  --bundle release-v2.x.y/nix-forge-ci-v2.x.y.intoto.jsonl \
   --signer-workflow nix-forge/ci/.github/workflows/slsa-source-release.yml \
   --signer-digest da90bfbbb18cfa1ceb176d55d2a1c3cd3e6b1049
 ```
@@ -37,9 +38,12 @@ the digest in this command synchronized with `.github/workflows/release.yml`.
 
 The reusable builder creates a source archive, a SHA-256 file, a release
 manifest, and an OIDC-backed SLSA build attestation before the protected
-publisher job receives the files. The publisher verifies the exact tag, bytes,
-and signer workflow before creating a draft GitHub Release, then publishes it
-only after all assets are attached. This is required for immutable-release
+publisher job receives the files. It exports the attestation as a portable
+`.intoto.jsonl` release asset so verification does not depend on an online
+attestation lookup. The publisher verifies the exact tag, bytes, bundle, and
+signer workflow before creating a draft GitHub Release, then publishes it only
+after all assets are attached. This work runs only for release tags and adds no
+pull-request or merge-queue jobs. It is required for immutable-release
 repositories. It does not publish opaque compiled assets. Release notes name
 the actor and workflow, list public inputs and outputs, describe the security
 assessment, and state the support and end-of-life window. A release stops

@@ -95,6 +95,7 @@ jobs:
             sha256sum "$BINARY_NAME" "$SBOM_NAME" "$BUILD_INFO_NAME" > "$CHECKSUM_NAME"
           )
       - name: Create SLSA build provenance
+        id: provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
@@ -107,6 +108,19 @@ jobs:
         with:
           subject-path: dist/nix-seal-${{ github.ref_name }}-${{ inputs.system }}
           sbom-path: dist/nix-seal-${{ github.ref_name }}-${{ inputs.system }}.cdx.json
+      - name: Export portable SLSA provenance
+        env:
+          BINARY_NAME: nix-seal-${{ github.ref_name }}-${{ inputs.system }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          subject="dist/$BINARY_NAME"
+          provenance="dist/$BINARY_NAME.intoto.jsonl"
+          cp "$PROVENANCE_BUNDLE" "$provenance"
+          test -s "$provenance"
+          gh attestation verify "$subject" \
+            --repo "$GITHUB_REPOSITORY" \
+            --bundle "$provenance"
       - name: Upload release inputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

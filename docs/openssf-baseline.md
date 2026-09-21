@@ -52,7 +52,8 @@ suppression records why the finding is not exploitable.
 Each source release records the reviewed commit, unique tag, workflow contract
 changes, public inputs and outputs, security impact, release actor and
 workflow, source verification method, threat-model review, and support window.
-The release process does not upload opaque compiled assets.
+Reusable builders publish portable SLSA provenance beside release artifacts;
+the release process does not upload opaque compiled assets.
 
 ## Governance and vulnerability response
 

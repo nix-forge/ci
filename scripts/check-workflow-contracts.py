@@ -132,6 +132,7 @@ def validate(root: Path) -> list[str]:
             verification = "\n".join(verification_script)
             for term in (
                 "gh attestation verify",
+                ".intoto.jsonl",
                 "--signer-workflow",
                 "--signer-digest",
                 "--source-ref",
