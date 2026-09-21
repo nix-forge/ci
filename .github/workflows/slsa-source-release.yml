@@ -72,12 +72,25 @@ jobs:
           } > release-manifest.txt
           cp "$notes" release-notes.md
       - name: Create SLSA build provenance
+        id: provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             ${{ inputs.project_name }}-${{ github.ref_name }}.tar.gz
             ${{ inputs.project_name }}-${{ github.ref_name }}.tar.gz.sha256
             release-manifest.txt
+      - name: Export portable SLSA provenance
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          archive="$PROJECT_NAME-$TAG.tar.gz"
+          provenance="$PROJECT_NAME-$TAG.intoto.jsonl"
+          cp "$PROVENANCE_BUNDLE" "$provenance"
+          test -s "$provenance"
+          gh attestation verify "$archive" \
+            --repo "$GITHUB_REPOSITORY" \
+            --bundle "$provenance"
       - name: Upload release inputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -85,6 +98,7 @@ jobs:
           path: |
             ${{ inputs.project_name }}-${{ github.ref_name }}.tar.gz
             ${{ inputs.project_name }}-${{ github.ref_name }}.tar.gz.sha256
+            ${{ inputs.project_name }}-${{ github.ref_name }}.intoto.jsonl
             release-manifest.txt
             release-notes.md
           if-no-files-found: error
