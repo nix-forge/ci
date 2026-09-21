@@ -11,6 +11,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   partitioning:
+    name: Fuzz check partitioning
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
