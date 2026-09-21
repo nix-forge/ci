@@ -1,0 +1,74 @@
+name: Fuzz with Atheris
+description: Run a bounded Python fuzz campaign and retain crashing inputs.
+inputs:
+  target:
+    description: Python fuzz target in the caller's fuzz directory.
+    required: true
+  python-version:
+    description: Python version supported by the caller's target.
+    default: '3.12'
+  duration:
+    description: Maximum campaign time in seconds, from 1 to 600.
+    default: '180'
+  input-timeout:
+    description: Maximum time per input in seconds, from 1 to 120.
+    default: '10'
+runs:
+  using: composite
+  steps:
+    - name: Validate fuzz inputs
+      shell: bash
+      env:
+        FUZZ_TARGET: ${{ inputs.target }}
+        FUZZ_DURATION: ${{ inputs.duration }}
+        FUZZ_INPUT_TIMEOUT: ${{ inputs.input-timeout }}
+      run: |
+        if [[ ! "$FUZZ_TARGET" =~ ^fuzz/[a-zA-Z0-9_-]+\.py$ || ! -f "$FUZZ_TARGET" ]]; then
+          echo 'target must name an existing fuzz/*.py file' >&2
+          exit 1
+        fi
+        if [[ ! "$FUZZ_DURATION" =~ ^[1-9][0-9]{0,2}$ ]]; then
+          echo 'duration must be an integer from 1 to 600' >&2
+          exit 1
+        fi
+        if (( FUZZ_DURATION > 600 )); then
+          echo 'duration must be an integer from 1 to 600' >&2
+          exit 1
+        fi
+        if [[ ! "$FUZZ_INPUT_TIMEOUT" =~ ^[1-9][0-9]{0,2}$ ]]; then
+          echo 'input-timeout must be an integer from 1 to 120' >&2
+          exit 1
+        fi
+        if (( FUZZ_INPUT_TIMEOUT > 120 )); then
+          echo 'input-timeout must be an integer from 1 to 120' >&2
+          exit 1
+        fi
+    - name: Set up Python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install Atheris
+      shell: bash
+      run: |
+        python3 -m venv "$RUNNER_TEMP/fuzz-venv"
+        "$RUNNER_TEMP/fuzz-venv/bin/pip" install --only-binary=:all: atheris==3.1.0
+    - name: Run Atheris
+      shell: bash
+      env:
+        FUZZ_TARGET: ${{ inputs.target }}
+        FUZZ_DURATION: ${{ inputs.duration }}
+        FUZZ_INPUT_TIMEOUT: ${{ inputs.input-timeout }}
+      run: |
+        mkdir -p "$RUNNER_TEMP/fuzz-crashes"
+        "$RUNNER_TEMP/fuzz-venv/bin/python" "$FUZZ_TARGET" \
+          "-max_total_time=$FUZZ_DURATION" \
+          "-timeout=$FUZZ_INPUT_TIMEOUT" \
+          "-artifact_prefix=$RUNNER_TEMP/fuzz-crashes/"
+    - name: Save crashing inputs
+      if: failure()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: fuzz-crashes
+        path: ${{ runner.temp }}/fuzz-crashes/
+        if-no-files-found: ignore
+        retention-days: 7
