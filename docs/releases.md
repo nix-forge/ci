@@ -29,7 +29,7 @@ gh attestation verify release-v2.x.y/nix-forge-ci-v2.x.y.tar.gz \
   --repo nix-forge/ci \
   --bundle release-v2.x.y/nix-forge-ci-v2.x.y.intoto.jsonl \
   --signer-workflow nix-forge/ci/.github/workflows/slsa-source-release.yml \
-  --signer-digest da90bfbbb18cfa1ceb176d55d2a1c3cd3e6b1049
+  --signer-digest 2705c51e254ef3f43e90da1ab8fc717a54991487
 ```
 
 The expected release identity is the `nix-forge/ci` repository and the pinned
@@ -49,6 +49,18 @@ the actor and workflow, list public inputs and outputs, describe the security
 assessment, and state the support and end-of-life window. A release stops
 receiving security updates when its support window ends or when the next major
 contract removes it from the supported matrix.
+
+The OpenSSF Signed-Releases check requires a `*.intoto.jsonl` asset on every
+recent release that has downloadable artifacts. The v2.8.0 release uses this workflow; future releases must do the same. The v2.6.0 and v2.7.0 archives have verifiable attestations
+in GitHub's attestation store, but those releases were published without a
+portable provenance asset. Their [immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases)
+cannot be amended. Keep release immutability enabled; the check will reflect
+the complete provenance assets as newer releases enter its sampling window.
+To verify either historical archive, use `gh attestation verify` with
+`--repo nix-forge/ci`, `--source-ref refs/tags/v2.6.0` or
+`refs/tags/v2.7.0`, the signer workflow above, and
+`--signer-digest da90bfbbb18cfa1ceb176d55d2a1c3cd3e6b1049`. GitHub
+retrieves the original attestation online; those releases have no local bundle.
 
 ## Compatibility
 
