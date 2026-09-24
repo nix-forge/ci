@@ -90,7 +90,9 @@ jobs:
           test -s "$provenance"
           gh attestation verify "$archive" \
             --repo "$GITHUB_REPOSITORY" \
-            --bundle "$provenance"
+            --bundle "$provenance" \
+            --signer-workflow nix-forge/ci/.github/workflows/slsa-source-release.yml \
+            --source-ref "$GITHUB_REF"
       - name: Upload release inputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
