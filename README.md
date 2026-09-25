@@ -1,5 +1,6 @@
 # nix-forge CI
 
+[![OpenSSF Baseline](https://www.bestpractices.dev/projects/14642/baseline)](https://www.bestpractices.dev/en/projects/14642/baseline-2)
 [![OpenSSF Developer Best Practices](https://www.bestpractices.dev/projects/14642/badge)](https://www.bestpractices.dev/en/projects/14642/passing)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/nix-forge/ci/badge)](https://scorecard.dev/viewer/?uri=github.com/nix-forge/ci)
 
