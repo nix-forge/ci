@@ -48,7 +48,7 @@ jobs:
           tag_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
           [[ "$tag_commit" == "$SOURCE_COMMIT" ]]
       - name: Set up Nix without a shared release cache
-        uses: nix-forge/ci/actions/setup-nix@b5ec655589b52df24c9b38d20a6b4bf364ec35cc # v2.5.4
+        uses: nix-forge/ci/actions/setup-nix@bb1b39a9082f72dc6c7ce596103ce7a5e4d29b01 # v2.8.0
         with:
           cache: 'false'
           cache-scope: release-build
