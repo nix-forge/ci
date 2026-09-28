@@ -7,9 +7,8 @@ updates:
     groups:
       shared-ci:
         patterns: ["nix-forge/ci"]
-        group-by: dependency-name
       actions-minor-patch:
-        group-by: dependency-name
+        # CodeQL init and analyze share runtime state and must update together.
         patterns: ['*']
         update-types: [minor, patch]
   - package-ecosystem: nix

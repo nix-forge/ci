@@ -158,6 +158,22 @@ class ContractTests(unittest.TestCase):
         )
         self.assertTrue(self.check(WORKFLOW, {".github/workflows/second.yml": extra}))
 
+    def test_codeql_actions_in_one_job_must_match(self):
+        workflow = WORKFLOW.replace(
+            "      - uses: nix-forge/ci/actions/setup-nix@" + PIN,
+            "      - uses: github/codeql-action/init@"
+            + PIN
+            + "\n      - uses: github/codeql-action/analyze@"
+            + "b" * 40,
+        )
+        self.assertTrue(
+            any(
+                "CodeQL actions in one job must use one commit" in error
+                for error in self.check(workflow)
+            )
+        )
+        self.assertEqual(self.check(workflow.replace("b" * 40, PIN)), [])
+
     def test_slsa_builder_pin_can_coexist_with_shared_release(self):
         builder = WORKFLOW.replace(
             "nix-forge/ci/actions/repository-checks@" + PIN,

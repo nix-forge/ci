@@ -86,10 +86,13 @@ def validate(root: Path) -> list[str]:
                 release_publisher = True
             steps = job.get("steps", [])
             checkout = None
+            codeql_pins = set()
             for step in steps:
                 uses = step.get("uses", "")
                 if uses:
                     reference(uses)
+                    if uses.startswith("github/codeql-action/"):
+                        codeql_pins.add(uses.rsplit("@", 1)[-1])
                     if uses.startswith(
                         ("actions/attest@", "actions/attest-build-provenance@")
                     ):
@@ -104,6 +107,8 @@ def validate(root: Path) -> list[str]:
                     checkout is None or checkout.get("fetch-depth") != "0"
                 ):
                     reject(f"{name}: repository-checks needs a full-history checkout")
+            if len(codeql_pins) > 1:
+                reject(f"{name}: CodeQL actions in one job must use one commit")
             if (
                 path not in actions
                 and checkout is not None
