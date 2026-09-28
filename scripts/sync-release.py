@@ -17,6 +17,14 @@ REFERENCE = re.compile(
 )
 
 
+def shared_release_reference(match: re.Match[str]) -> bool:
+    """Keep separately reviewed validation and release builders on their own pins."""
+    return not (
+        match[1].endswith("/actions/repository-checks")
+        or "/.github/workflows/slsa-" in match[1]
+    )
+
+
 def release_pin(tag: str | None) -> tuple[str, str]:
     """Resolve GitHub's latest stable release, or a named published release."""
 
@@ -49,12 +57,21 @@ def updates(root: Path, version: str, sha: str) -> dict[Path, str]:
     for paths in inventory.values():
         for path in paths:
             text = path.read_text()
-            found = found or bool(REFERENCE.search(text))
-            updated = REFERENCE.sub(lambda match: f"{match[1]}@{sha} # {version}", text)
+            found = found or any(
+                shared_release_reference(match) for match in REFERENCE.finditer(text)
+            )
+            updated = REFERENCE.sub(
+                lambda match: (
+                    f"{match[1]}@{sha} # {version}"
+                    if shared_release_reference(match)
+                    else match[0]
+                ),
+                text,
+            )
             if text != updated:
                 result[path] = updated
     if not found:
-        raise ValueError(f"No shared CI references found in {root}")
+        raise ValueError(f"No shared CI release references found in {root}")
     return result
 
 

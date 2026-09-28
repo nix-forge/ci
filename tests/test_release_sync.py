@@ -53,6 +53,8 @@ class ReleaseTests(unittest.TestCase):
             source = (
                 f"    uses: nix-forge/ci/.github/workflows/codeql.yml@{OLD} # v2.4.0\n"
                 f"      - uses: nix-forge/ci/actions/setup-nix@{OLD}\n"
+                f"      - uses: nix-forge/ci/actions/repository-checks@{OLD} # reviewed\n"
+                f"    uses: nix-forge/ci/.github/workflows/slsa-source-release.yml@{OLD} # reviewed\n"
                 f"      - uses: other/action@{OLD} # v1.0.0\n"
             )
             names = [
@@ -70,6 +72,8 @@ class ReleaseTests(unittest.TestCase):
             for path, content in changes.items():
                 self.assertEqual(path.read_text(), source)
                 self.assertEqual(content.count(f"@{NEW} # v2.5.0"), 2)
+                self.assertIn(f"actions/repository-checks@{OLD} # reviewed", content)
+                self.assertIn(f"slsa-source-release.yml@{OLD} # reviewed", content)
                 self.assertIn(f"other/action@{OLD} # v1.0.0", content)
                 path.write_text(content)
             self.assertEqual(sync.updates(root, "v2.5.0", NEW), {})
