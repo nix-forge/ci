@@ -173,7 +173,21 @@ def validate(root: Path) -> list[str]:
                     "nix-forge/ci/actions/reconcile-queue@"
                 ):
                     continue
-                for filename in json.loads(step["with"]["workflows"]):
+                configured = json.loads(step["with"]["workflows"])
+                base_sha_workflows = json.loads(
+                    step["with"].get("base-sha-workflows", "[]")
+                )
+                if (root / ".github/workflows/dco.yml").exists():
+                    if "dco.yml" not in configured:
+                        errors.append("dco.yml: required DCO must run on queue refs")
+                    if "dco.yml" not in base_sha_workflows:
+                        errors.append("dco.yml: queue dispatch needs its base SHA")
+                    triggers = (
+                        data.get("on", {}).get("workflow_run", {}).get("workflows", [])
+                    )
+                    if "DCO" not in triggers:
+                        errors.append("reconciler must react to DCO completion")
+                for filename in configured:
                     path = root / ".github/workflows" / filename
                     workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
                     events = workflow.get("on", {})
@@ -203,9 +217,7 @@ def validate(root: Path) -> list[str]:
                         errors.append(
                             f"{filename}: callback must be restricted to queue dispatches"
                         )
-                for filename in json.loads(
-                    step["with"].get("base-sha-workflows", "[]")
-                ):
+                for filename in base_sha_workflows:
                     path = root / ".github/workflows" / filename
                     workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
                     dispatch = workflow.get("on", {}).get("workflow_dispatch") or {}

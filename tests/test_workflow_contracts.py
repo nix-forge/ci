@@ -287,3 +287,41 @@ jobs:
         )
         self.assertTrue(any("callback" in error for error in errors))
         self.assertTrue(any("dispatch triggers" in error for error in errors))
+
+    def test_dco_cannot_be_omitted_from_queue_fallback(self):
+        reconciler = """name: Reconcile
+on:
+  workflow_run:
+    workflows: [CI]
+permissions: {}
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: nix-forge/ci/actions/reconcile-queue@PIN
+        with:
+          workflows: '["ci.yml"]'
+""".replace("PIN", PIN)
+        dco = """name: DCO
+on:
+  merge_group:
+  workflow_dispatch:
+    inputs:
+      base_sha:
+        required: false
+permissions: {}
+jobs: {}
+"""
+        errors = self.check(
+            WORKFLOW,
+            {
+                ".github/workflows/dco.yml": dco,
+                ".github/workflows/reconcile-merge-queue.yml": reconciler,
+            },
+        )
+        self.assertTrue(any("required DCO must run" in error for error in errors))
+        self.assertTrue(
+            any("queue dispatch needs its base SHA" in error for error in errors)
+        )
+        self.assertTrue(any("react to DCO completion" in error for error in errors))
