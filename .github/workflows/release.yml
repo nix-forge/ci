@@ -16,7 +16,7 @@ env:
 jobs:
   build:
     name: build and attest source release
-    uses: nix-forge/ci/.github/workflows/slsa-source-release.yml@2705c51e254ef3f43e90da1ab8fc717a54991487 # reviewed SLSA builder
+    uses: nix-forge/ci/.github/workflows/slsa-source-release.yml@c095d91dfeef25e54e890e1ef035b69c98ba910f # reviewed SLSA builder
     with:
       project_name: nix-forge-ci
       release_notes_directory: docs/releases
