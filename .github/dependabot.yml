@@ -6,7 +6,10 @@ updates:
       interval: weekly
     groups:
       shared-ci:
-        patterns: ["nix-forge/ci"]
+        patterns: ["nix-forge/ci", "nix-forge/ci/*"]
+        exclude-patterns:
+          - "nix-forge/ci/.github/workflows/slsa-*"
+          - "nix-forge/ci/actions/repository-checks"
       actions-minor-patch:
         # CodeQL init and analyze share runtime state and must update together.
         patterns: ['*']

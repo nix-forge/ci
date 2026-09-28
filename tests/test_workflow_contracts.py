@@ -158,6 +158,29 @@ class ContractTests(unittest.TestCase):
         )
         self.assertTrue(self.check(WORKFLOW, {".github/workflows/second.yml": extra}))
 
+    def test_shared_ci_group_covers_nested_action_paths(self):
+        config = """version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    groups:
+      shared-ci:
+        patterns: ["nix-forge/ci"]
+"""
+        errors = self.check(WORKFLOW, {".github/dependabot.yml": config})
+        self.assertTrue(any("group does not cover" in error for error in errors))
+        wildcard = config.replace('"nix-forge/ci"', '"nix-forge/ci/*"')
+        self.assertEqual(self.check(WORKFLOW, {".github/dependabot.yml": wildcard}), [])
+        split = wildcard.replace(
+            "    groups:", "    group-by: dependency-name\n    groups:"
+        )
+        self.assertTrue(
+            any(
+                "group-by splits" in error
+                for error in self.check(WORKFLOW, {".github/dependabot.yml": split})
+            )
+        )
+
     def test_codeql_actions_in_one_job_must_match(self):
         workflow = WORKFLOW.replace(
             "      - uses: nix-forge/ci/actions/setup-nix@" + PIN,

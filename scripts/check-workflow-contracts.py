@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import sys
@@ -15,6 +16,7 @@ def validate(root: Path) -> list[str]:
     """Return actionable policy errors without contacting GitHub."""
     errors = []
     pins = set()
+    shared_dependencies = set()
     inventory = workflow_files(root)
     workflows = inventory["workflows"]
     templates = inventory["templates"]
@@ -44,6 +46,7 @@ def validate(root: Path) -> list[str]:
                 # CI API stable while validation and release trust boundaries
                 # are reviewed and rolled forward separately.
                 pins.add(value.rsplit("@", 1)[-1])
+                shared_dependencies.add(value.rsplit("@", 1)[0])
 
         if path in actions:
             jobs = {"composite": {"steps": data.get("runs", {}).get("steps", [])}}
@@ -164,6 +167,27 @@ def validate(root: Path) -> list[str]:
         errors.append(
             "shared CI references must use one reviewed release commit per repository"
         )
+    dependabot = root / ".github/dependabot.yml"
+    if dependabot.exists() and shared_dependencies:
+        config = yaml.safe_load(dependabot.read_text())
+        for update in config.get("updates", []):
+            if update.get("package-ecosystem") != "github-actions":
+                continue
+            group = update.get("groups", {}).get("shared-ci", {})
+            if not group:
+                continue
+            if update.get("group-by") == "dependency-name":
+                errors.append("shared-ci: group-by splits shared release updates")
+            patterns = group.get("patterns", [])
+            exclusions = group.get("exclude-patterns", [])
+            for dependency in shared_dependencies:
+                if not any(
+                    fnmatch.fnmatchcase(dependency, pattern) for pattern in patterns
+                ) or any(
+                    fnmatch.fnmatchcase(dependency, pattern) for pattern in exclusions
+                ):
+                    errors.append(f"shared-ci: group does not cover {dependency}")
+            break
     reconciler = root / ".github/workflows/reconcile-merge-queue.yml"
     if reconciler.exists():
         data = yaml.load(reconciler.read_text(), Loader=yaml.BaseLoader)
