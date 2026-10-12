@@ -1135,6 +1135,9 @@ class PackageSourceTests(unittest.TestCase):
             "head",
             "url",
             "attempt",
+            "new_run",
+            "job_attempt",
+            "job_run",
         ):
             with self.subTest(invalid=invalid):
                 self.setUp()
