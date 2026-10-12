@@ -1,0 +1,24 @@
+name: Resolve release builder identity
+description: Select the immutable signer commit from the tagged caller workflow.
+inputs:
+  workflow:
+    description: Relative path to the caller's release workflow.
+    default: .github/workflows/release.yml
+outputs:
+  sha:
+    description: Commit of the pinned reusable SLSA builder.
+    value: ${{ steps.builder.outputs.sha }}
+runs:
+  using: composite
+  steps:
+    - id: builder
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        WORKFLOW: ${{ inputs.workflow }}
+      run: |
+        set -euo pipefail
+        [[ "$WORKFLOW" =~ ^[A-Za-z0-9._/-]+\.ya?ml$ ]]
+        [[ "$WORKFLOW" != /* && "$WORKFLOW" != *..* ]]
+        sha=$(bash "$ACTION_PATH/../../scripts/release-builder-sha.sh" "$WORKFLOW")
+        printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
