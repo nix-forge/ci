@@ -29,12 +29,13 @@ gh attestation verify release-v2.x.y/nix-forge-ci-v2.x.y.tar.gz \
   --repo nix-forge/ci \
   --bundle release-v2.x.y/nix-forge-ci-v2.x.y.intoto.jsonl \
   --signer-workflow nix-forge/ci/.github/workflows/slsa-source-release.yml \
-  --signer-digest 2705c51e254ef3f43e90da1ab8fc717a54991487
+  --signer-digest <BUILDER_COMMIT_SHA>
 ```
 
 The expected release identity is the `nix-forge/ci` repository and the pinned
 `nix-forge/ci/.github/workflows/slsa-source-release.yml` reusable builder. Keep
-the digest in this command synchronized with `.github/workflows/release.yml`.
+the digest equal to the reviewed reusable builder pin in
+`.github/workflows/release.yml` at the tag being verified.
 
 The reusable builder creates a source archive, a SHA-256 file, a release
 manifest, and an OIDC-backed SLSA build attestation before the protected
