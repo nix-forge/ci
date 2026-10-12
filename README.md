@@ -20,6 +20,7 @@ For tagged source archives, see [release provenance and verification](docs/slsa.
 | `dependency-review.yml` | `contents: read` | Fail on new vulnerabilities at low severity or higher; optional `base-ref` and `head-ref` for dispatch |
 | `request-review.yml` | `pull-requests: write` | Metadata-only `pull_request_target`; human PRs excluding the maintainer |
 | `nur.yml` | `contents: read` | Caller supplies `scripts/check-nur.py` and `tests/nur-supported.nix` |
+| `retry-scorecard.yml` | `actions: write`, `contents: read` | Retry current default-branch Scorecard GitHub API 502/503/504 failures; at most two retries |
 
 Call reusable workflows at the job level using a full commit SHA. Callers retain
 events, concurrency and repository-specific inputs. Permissions cannot increase
@@ -108,7 +109,10 @@ The actions read the default branch from GitHub's repository event metadata.
 Use that same default branch in the caller's callback guard. A package updater
 can opt in to admission with `automation-branch`; it accepts only that exact
 branch from the same repository and the `github-actions[bot]` author. Dependabot
-admission remains enabled. Automation file changes still require human admission.
+admission remains enabled. Same-repository Dependabot updates to existing action
+SHA pins can enter automatically after full immutable workflow blobs prove that
+only pins and version comments changed. Runtime code, permissions, renamed or
+new workflows, and other automation changes still require deliberate admission.
 Set `base-sha-workflows: '["ci.yml"]'` for a workflow that declares a `base_sha`
 dispatch input. This supplies the queue commit's first parent for derivation
 comparison without teaching the shared library repository names.

@@ -1,0 +1,55 @@
+name: Retry transient Scorecard failures
+on:
+  workflow_call:
+    inputs:
+      source-run-id:
+        description: Failed Scorecard run from the caller's workflow_run event.
+        type: string
+        required: true
+permissions: {}
+jobs:
+  retry:
+    name: Retry transient Scorecard failures
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write # Retry only a verified transient failure on the current default branch.
+      contents: read
+    steps:
+      - name: Retry verified GitHub API outages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ inputs.source-run-id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          run=$(gh api "repos/$GH_REPO/actions/runs/$SOURCE_RUN_ID")
+          branch=$(gh api "repos/$GH_REPO" --jq .default_branch)
+          current_sha=$(gh api "repos/$GH_REPO/commits/$branch" --jq .sha)
+          if ! jq -e --arg repo "$GH_REPO" --arg branch "$branch" --arg sha "$current_sha" '
+            .repository.full_name == $repo and
+            .head_repository.full_name == $repo and
+            .name == "OpenSSF Scorecard" and
+            .path == ".github/workflows/scorecard.yml" and
+            .head_branch == $branch and .head_sha == $sha and
+            (.event == "schedule" or .event == "push" or .event == "workflow_dispatch") and
+            .status == "completed" and .conclusion == "failure" and
+            .run_attempt >= 1 and .run_attempt < 3
+          ' <<< "$run" >/dev/null; then
+            echo 'Run is ineligible for automatic retry.'
+            exit 0
+          fi
+          gh run view "$SOURCE_RUN_ID" --repo "$GH_REPO" --log-failed > "$RUNNER_TEMP/scorecard-failure.log"
+          if ! grep -Eq 'scorecard had an error: internal error:.*githubv4.Query: non-200 OK status code: (502|503|504)' "$RUNNER_TEMP/scorecard-failure.log"; then
+            echo 'Failure needs a fix rather than an outage retry.'
+            exit 0
+          fi
+          attempt=$(jq -r .run_attempt <<< "$run")
+          sleep "$((attempt * 30))"
+          # Another callback or operator may have already retried this run.
+          latest_attempt=$(gh api "repos/$GH_REPO/actions/runs/$SOURCE_RUN_ID" --jq .run_attempt)
+          latest_sha=$(gh api "repos/$GH_REPO/commits/$branch" --jq .sha)
+          [[ "$latest_attempt" == "$attempt" && "$latest_sha" == "$current_sha" ]] || exit 0
+          gh run rerun "$SOURCE_RUN_ID" --repo "$GH_REPO" --failed

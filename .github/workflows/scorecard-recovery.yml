@@ -1,0 +1,18 @@
+name: Recover Scorecard API outages
+on: # zizmor: ignore[dangerous-triggers] Validates API metadata; never checks out caller code.
+  workflow_run:
+    workflows: ["OpenSSF Scorecard"]
+    types: [completed]
+permissions: {}
+concurrency:
+  group: scorecard-recovery-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+jobs:
+  recover:
+    if: github.event.workflow_run.conclusion == 'failure'
+    permissions:
+      actions: write # The called workflow bounds retries and checks the exact current revision.
+      contents: read
+    uses: ./.github/workflows/retry-scorecard.yml # zizmor: ignore[self-repository]
+    with:
+      source-run-id: ${{ format('{0}', github.event.workflow_run.id) }}

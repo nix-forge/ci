@@ -33,3 +33,7 @@ jobs:
           languages: ${{ inputs.languages }}
           build-mode: none
       - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          # Queue refs can disappear after another group merges. Query execution
+          # still gates the queue; stable PR and default-branch scans publish SARIF.
+          upload: ${{ github.event_name != 'merge_group' && !startsWith(github.ref, format('refs/heads/gh-readonly-queue/{0}/', github.event.repository.default_branch)) }}

@@ -10,9 +10,6 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  SLSA_BUILDER_SHA: 2705c51e254ef3f43e90da1ab8fc717a54991487
-
 jobs:
   build:
     name: build and attest source release
@@ -43,9 +40,11 @@ jobs:
       - name: Validate release metadata
         env:
           TAG: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"
           notes="docs/releases/$TAG.md"
           test -s "$notes"
           grep -q '^## Changelog$' "$notes"
@@ -57,10 +56,10 @@ jobs:
       - name: Verify release bytes and provenance
         env:
           GH_TOKEN: ${{ github.token }}
-          SLSA_BUILDER_SHA: ${{ env.SLSA_BUILDER_SHA }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          SLSA_BUILDER_SHA=$(bash scripts/release-builder-sha.sh .github/workflows/release.yml)
           archive="release/nix-forge-ci-$TAG.tar.gz"
           checksum="$archive.sha256"
           provenance="release/nix-forge-ci-$TAG.intoto.jsonl"

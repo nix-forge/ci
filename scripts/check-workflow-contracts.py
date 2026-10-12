@@ -129,6 +129,10 @@ def validate(root: Path) -> list[str]:
                 reject(
                     "tagged releases must call exactly one pinned nix-forge/ci SLSA builder"
                 )
+            elif "SLSA_BUILDER_SHA" in data.get("env", {}):
+                builder_sha = slsa_builders[0].rsplit("@", 1)[-1]
+                if data["env"]["SLSA_BUILDER_SHA"] != builder_sha:
+                    reject("release signer digest must match the pinned SLSA builder")
             if inline_attestation:
                 reject(
                     "tagged releases must attest in the reusable builder, not in the caller"

@@ -27,13 +27,15 @@ Consumers should verify an artifact with the GitHub CLI, for example:
 ```console
 gh attestation verify artifact.tar.gz \
   --repo nix-forge/REPOSITORY \
-  --signer-workflow nix-forge/ci/.github/workflows/slsa-source-release.yml \\
-  --signer-digest 2705c51e254ef3f43e90da1ab8fc717a54991487
+  --signer-workflow nix-forge/ci/.github/workflows/slsa-source-release.yml \
+  --signer-digest <BUILDER_COMMIT_SHA>
 ```
 
-The digest is the reviewed builder commit used by the current release
-workflows. Callers must update it, and their verification documentation, in
-the same change when they roll the builder forward.
+Replace `<BUILDER_COMMIT_SHA>` with the reviewed reusable builder pin in the
+release workflow at the tag being verified. The publisher resolves that same
+immutable pin with `scripts/release-builder-sha.sh`, so a builder update cannot
+leave verification tied to an older signer. A separately declared
+`SLSA_BUILDER_SHA` must match the builder pin or workflow validation fails.
 
 This is a SLSA Build track control for named release artifacts. It does not
 make routine test outputs, source files, or a Nix flake itself a Build Level 3
