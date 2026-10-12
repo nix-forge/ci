@@ -127,8 +127,16 @@ Source statuses link actual successful required jobs only after every configured
 workflow and required job passes on the exact source SHA. A blocked approval run
 can be ignored only when its jobs endpoint proves zero jobs. Failed, pending,
 skipped, missing, stale and untrusted evidence never becomes success; newer
-attempts invalidate older source adapter results. Normal required checks and
-expected-head merge-queue admission still apply. This opt-in adds no token
+attempts invalidate older source adapter results. Actual failed required jobs
+receive failure statuses linking the current failed job. Normal required checks and
+expected-head merge-queue admission still apply. Unchanged completed runs reuse
+only this bot's previously verified job attestations for the same run and attempt;
+latest-run metadata remains live. Immutable Git objects and workflow identity are
+cached only within one reconciliation. Opted-in callers should also reconcile
+`workflow_run` requested and in-progress events to invalidate rerun results early.
+These events inspect only their exact source head; initial events without prior
+results do not poll validation, and unrelated scans skip already-admitted heads.
+Keep hourly scheduled recovery for missed events. This opt-in adds no token
 permissions and leaves existing synthetic queue result reporting unchanged.
 
 Set `base-sha-workflows: '["ci.yml"]'` for a workflow that declares a `base_sha`

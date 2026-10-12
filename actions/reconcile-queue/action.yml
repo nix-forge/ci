@@ -27,6 +27,8 @@ runs:
         BASE_SHA_WORKFLOWS: ${{ inputs.base-sha-workflows }}
         QUEUE_WORKFLOWS: ${{ inputs.workflows }}
         SOURCE_RUN_ID: ${{ inputs.source-run-id }}
+        SOURCE_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        SOURCE_ACTIVITY: ${{ github.event.action }}
       run: |
         set -euo pipefail
         if [[ -n "$SOURCE_RUN_ID" && ! "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]; then
@@ -88,4 +90,6 @@ runs:
         BASE_SHA_WORKFLOWS: ${{ inputs.base-sha-workflows }}
         QUEUE_WORKFLOWS: ${{ inputs.workflows }}
         SOURCE_RUN_ID: ${{ inputs.source-run-id }}
+        SOURCE_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        SOURCE_ACTIVITY: ${{ github.event.action }}
       run: python3 "$ACTION_PATH/../../scripts/reconcile-queue.py"

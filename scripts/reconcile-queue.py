@@ -30,6 +30,10 @@ QUEUE_PREFIX = f"refs/heads/gh-readonly-queue/{DEFAULT_BRANCH}/"
 ADMISSION = "Merge queue admission"
 SOURCE_CHECKS = json.loads(os.environ.get("PACKAGE_SOURCE_CHECKS", "{}"))
 SOURCE_REPORT = "Mirrored package source job"
+SOURCE_HEAD = os.environ.get("SOURCE_HEAD_SHA", "")
+SOURCE_ACTIVITY = os.environ.get("SOURCE_ACTIVITY", "")
+SOURCE_CACHE: dict[str, Any] = {}
+SOURCE_EVIDENCE: dict[str, dict[str, Any]] = {}
 PAGE_SIZE = 100
 GH = shutil.which("gh") or "/usr/bin/gh"
 
@@ -79,8 +83,22 @@ def admit(pr: dict[str, Any]) -> bool:
 
     """
     source = bool(SOURCE_CHECKS) and source_identity(pr)
-    if source and not reconcile_source(pr):
-        return False
+    source_statuses = None
+    if source:
+        sha = pr["head"]["sha"]
+        if SOURCE_HEAD and SOURCE_HEAD != sha:
+            return False
+        source_statuses = read_statuses(sha)
+        if not SOURCE_HEAD and any(
+            status["context"] == ADMISSION for status in source_statuses.values()
+        ):
+            state = graphql(
+                "query($id:ID!) { node(id:$id) { ... on PullRequest { mergeQueueEntry { id } } } }",
+                id=pr["node_id"],
+            )["node"]
+            return bool(state["mergeQueueEntry"])
+        if not reconcile_source(pr, source_statuses):
+            return False
     trusted = (
         source
         or pr["user"]["login"] == "dependabot[bot]"
@@ -123,7 +141,11 @@ def admit(pr: dict[str, Any]) -> bool:
         return True
     # Once admitted, a rejected head needs a fix or deliberate requeue.
     # Never keep rebuilding the same failing merge group indefinitely.
-    statuses = api(f"repos/{REPOSITORY}/commits/{sha}/status")["statuses"]
+    statuses = (
+        list(source_statuses.values())
+        if source_statuses is not None
+        else api(f"repos/{REPOSITORY}/commits/{sha}/status")["statuses"]
+    )
     if any(status["context"] == ADMISSION for status in statuses):
         print(f"PR #{number}: already admitted this head; leave rejection for review")
         return False
@@ -412,6 +434,18 @@ def source_identity(pr: dict[str, Any]) -> bool:
     )
 
 
+def source_read(path: str) -> Any:  # ruff: ignore[any-type]
+    """Cache immutable source objects and stable workflow identity within one pass.
+
+    Returns:
+        The authoritative response; current refs and latest runs are never cached.
+
+    """
+    if path not in SOURCE_CACHE:
+        SOURCE_CACHE[path] = api(path)
+    return SOURCE_CACHE[path]
+
+
 def source_contract(pr: dict[str, Any]) -> str | None:
     """Prove the real source parent, owned paths and current workflow identities.
 
@@ -420,7 +454,7 @@ def source_contract(pr: dict[str, Any]) -> str | None:
 
     """
     sha = pr["head"]["sha"]
-    commit = api(f"repos/{REPOSITORY}/git/commits/{sha}")
+    commit = source_read(f"repos/{REPOSITORY}/git/commits/{sha}")
     parents = commit.get("parents", [])
     if len(parents) != 1:
         return None
@@ -430,10 +464,10 @@ def source_contract(pr: dict[str, Any]) -> str | None:
     protected = api(
         f"repos/{REPOSITORY}/git/ref/heads/{quote(DEFAULT_BRANCH, safe='')}"
     )["object"]["sha"]
-    comparison = api(f"repos/{REPOSITORY}/compare/{base}...{protected}")
+    comparison = source_read(f"repos/{REPOSITORY}/compare/{base}...{protected}")
     if comparison.get("status") not in {"ahead", "identical"}:
         return None
-    changes = api(f"repos/{REPOSITORY}/compare/{base}...{sha}")
+    changes = source_read(f"repos/{REPOSITORY}/compare/{base}...{sha}")
     files = changes.get("files", [])
     package = pr["head"]["ref"].removeprefix("automation/package-updates-")
     prefix = f"pkgs/by-name/{package[:2]}/{package}/"
@@ -455,7 +489,7 @@ def source_contract(pr: dict[str, Any]) -> str | None:
         return None
     trees = []
     for revision in (sha, protected):
-        tree = api(f"repos/{REPOSITORY}/git/trees/{revision}?recursive=1")
+        tree = source_read(f"repos/{REPOSITORY}/git/trees/{revision}?recursive=1")
         if tree.get("truncated") is not False:
             return None
         trees.append({item["path"]: item for item in tree["tree"]})
@@ -474,178 +508,275 @@ def source_contract(pr: dict[str, Any]) -> str | None:
     return base
 
 
-def source_jobs(pr: dict[str, Any]) -> list[dict[str, Any]] | None:
-    """Read the latest actual validation attempt for every trusted workflow.
+def source_run(
+    pr: dict[str, Any], workflow: str
+) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
+    """Select the latest real exact-head run, proving approval-only exclusions.
 
     Returns:
-        Its real completed jobs, or None while evidence is missing or pending.
+        Current run metadata and optional already-read jobs, or None.
 
     """
-    jobs: list[dict[str, Any]] = []
     sha, branch = pr["head"]["sha"], pr["head"]["ref"]
-    for workflow in WORKFLOWS:
-        metadata = api(f"repos/{REPOSITORY}/actions/workflows/{workflow}")
-        path = f".github/workflows/{workflow}"
-        if metadata.get("path") != path or metadata.get("state") != "active":
-            return None
-        response = api(
-            f"repos/{REPOSITORY}/actions/workflows/{workflow}/runs?head_sha={sha}&per_page={PAGE_SIZE}"
-        )
-        if response["total_count"] > PAGE_SIZE:
-            return None
-        selected = None
-        selected_jobs = []
-        for run in response["workflow_runs"]:
-            if not (
-                run.get("workflow_id") == metadata["id"]
-                and run.get("path") == path
-                and run.get("head_sha") == sha
-                and run.get("head_branch") == branch
-                and run.get("repository", {}).get("full_name") == REPOSITORY
-                and run.get("head_repository", {}).get("full_name") == REPOSITORY
-                and run.get("event") in {"pull_request", "workflow_dispatch"}
-                and isinstance(run.get("id"), int)
-                and run["id"] > 0
-                and isinstance(run.get("run_attempt"), int)
-                and run["run_attempt"] > 0
-            ):
-                continue
+    metadata = source_read(f"repos/{REPOSITORY}/actions/workflows/{workflow}")
+    path = f".github/workflows/{workflow}"
+    if metadata.get("path") != path or metadata.get("state") != "active":
+        return None
+    response = api(
+        f"repos/{REPOSITORY}/actions/workflows/{workflow}/runs?head_sha={sha}&per_page={PAGE_SIZE}"
+    )
+    if (
+        not isinstance(response.get("total_count"), int)
+        or not 0 <= response["total_count"] <= PAGE_SIZE
+        or not isinstance(response.get("workflow_runs"), list)
+    ):
+        return None
+    for run in response["workflow_runs"]:
+        if not (
+            run.get("workflow_id") == metadata["id"]
+            and run.get("path") == path
+            and run.get("head_sha") == sha
+            and run.get("head_branch") == branch
+            and run.get("repository", {}).get("full_name") == REPOSITORY
+            and run.get("head_repository", {}).get("full_name") == REPOSITORY
+            and run.get("event") in {"pull_request", "workflow_dispatch"}
+            and isinstance(run.get("id"), int)
+            and run["id"] > 0
+            and isinstance(run.get("run_attempt"), int)
+            and run["run_attempt"] > 0
+        ):
+            continue
+        batch = None
+        if (
+            run.get("status") == "completed"
+            and run.get("conclusion") == "action_required"
+        ):
             batch = api(
                 f"repos/{REPOSITORY}/actions/runs/{run['id']}/jobs?filter=latest&per_page={PAGE_SIZE}"
             )
-            if batch["total_count"] > PAGE_SIZE:
-                return None
-            if (
-                run.get("status") == "completed"
-                and run.get("conclusion") == "action_required"
-                and batch["total_count"] == 0
-                and batch["jobs"] == []
-            ):
+            if batch.get("total_count") == 0 and batch.get("jobs") == []:
                 continue
-            selected, selected_jobs = run, batch["jobs"]
-            break
-        if selected is None or selected.get("status") != "completed":
+        return run.copy(), batch
+    return None
+
+
+def source_runs_current(pr: dict[str, Any]) -> bool:
+    """Reject any producer run or attempt that changed after collection.
+
+    Returns:
+        Whether every collected run still has its exact inspected identity/state.
+
+    """
+    for workflow, expected in SOURCE_EVIDENCE[pr["head"]["sha"]]["runs"].items():
+        selected = source_run(pr, workflow)
+        if selected is None or any(
+            selected[0].get(key) != expected.get(key)
+            for key in ("id", "run_attempt", "head_sha", "status", "conclusion")
+        ):
+            return False
+    return True
+
+
+def source_jobs(
+    pr: dict[str, Any], statuses: dict[str, Any] | None = None
+) -> list[dict[str, Any]] | None:
+    """Collect actual current jobs, or reuse our verified unchanged-run attestation.
+
+    Returns:
+        All required successful jobs, or None for incomplete/failed evidence.
+
+    """
+    sha = pr["head"]["sha"]
+    evidence: dict[str, Any] = {"runs": {}, "failures": []}
+    SOURCE_EVIDENCE[sha] = evidence
+    jobs: list[dict[str, Any]] = []
+    failures = {"failure", "timed_out", "cancelled"}
+    for workflow in WORKFLOWS:
+        selected = source_run(pr, workflow)
+        if selected is None:
             return None
-        history = api(
-            f"repos/{REPOSITORY}/actions/workflows/{workflow}/runs?head_sha={sha}&per_page={PAGE_SIZE}"
-        )
-        if history["total_count"] > PAGE_SIZE:
+        run, batch = selected
+        evidence["runs"][workflow] = run
+        if run.get("status") != "completed":
             return None
-        fresh = next(
-            (
-                run
-                for run in history["workflow_runs"]
-                if run.get("id") == selected["id"]
-            ),
-            {},
+        previous = (
+            [statuses.get(context, {}) for context in SOURCE_CHECKS[workflow]]
+            if statuses
+            else []
         )
-        position = next(
-            (
-                index
-                for index, run in enumerate(history["workflow_runs"])
-                if run.get("id") == selected["id"]
-            ),
-            None,
-        )
-        if position is None:
-            return None
-        for newer in history["workflow_runs"][:position]:
-            if (
-                newer.get("head_sha") != sha
-                or newer.get("workflow_id") != metadata["id"]
-            ):
-                return None
-            batch = api(
-                f"repos/{REPOSITORY}/actions/runs/{newer['id']}/jobs?filter=latest&per_page={PAGE_SIZE}"
+        description = f"{SOURCE_REPORT} result; attempt {run['run_attempt']}"
+        prefix = f"https://github.com/{REPOSITORY}/actions/runs/{run['id']}/job/"
+        if (
+            run.get("conclusion") == "success"
+            and previous
+            and all(
+                status.get("state") == "success"
+                and status.get("description") == description
+                and status.get("creator", {}).get("id") == 41898282
+                and re.fullmatch(
+                    re.escape(prefix) + r"[0-9]+", status.get("target_url", "")
+                )
+                for status in previous
             )
-            if not (
-                newer.get("status") == "completed"
-                and newer.get("conclusion") == "action_required"
-                and batch.get("total_count") == 0
-                and batch.get("jobs") == []
-            ):
-                return None
-        fresh_attempt = api(f"repos/{REPOSITORY}/actions/runs/{selected['id']}")
-        if fresh != selected or fresh_attempt.get("run_attempt") != selected.get(
-            "run_attempt"
+        ):
+            jobs.extend(
+                {
+                    "name": status["context"],
+                    "html_url": status["target_url"],
+                    "attempt": run["run_attempt"],
+                }
+                for status in previous
+            )
+            continue
+        if batch is None:
+            batch = api(
+                f"repos/{REPOSITORY}/actions/runs/{run['id']}/jobs?filter=latest&per_page={PAGE_SIZE}"
+            )
+        if (
+            not isinstance(batch.get("total_count"), int)
+            or not 0 <= batch["total_count"] <= PAGE_SIZE
+            or not isinstance(batch.get("jobs"), list)
+            or batch["total_count"] != len(batch["jobs"])
         ):
             return None
+        selected_jobs = batch["jobs"]
         if any(
-            fresh.get(key) != selected.get(key)
-            for key in ("head_sha", "run_attempt", "status", "conclusion")
-        ):
-            return None
-        if selected.get("conclusion") != "success" or any(
             job.get("head_sha") != sha or job.get("status") != "completed"
             for job in selected_jobs
         ):
             return None
+        current_jobs = []
         for context in SOURCE_CHECKS[workflow]:
             matches = [job for job in selected_jobs if job.get("name") == context]
-            if len(matches) != 1 or matches[0].get("conclusion") != "success":
+            if len(matches) != 1:
                 return None
             job = matches[0]
-            if not job.get("html_url", "").startswith(
-                f"https://github.com/{REPOSITORY}/actions/runs/{selected['id']}/job/"
+            if (
+                not isinstance(job.get("id"), int)
+                or job["id"] <= 0
+                or job.get("html_url") != f"{prefix}{job['id']}"
             ):
                 return None
-            jobs.append(job)
+            record = {**job, "attempt": run["run_attempt"]}
+            current_jobs.append(record)
+            if job.get("conclusion") in failures:
+                evidence["failures"].append(record)
+        if run.get("conclusion") != "success" or any(
+            job.get("conclusion") != "success" for job in current_jobs
+        ):
+            return None
+        jobs.extend(current_jobs)
     return jobs
 
 
-def reconcile_source(pr: dict[str, Any]) -> bool:
-    """Expose only verified source results, preserving failures and pending work.
+def reconcile_source(
+    pr: dict[str, Any],
+    statuses: dict[str, Any] | None = None,
+    *,
+    allow_success: bool = True,
+) -> bool:
+    """Report real source outcomes and keep producer races from admission.
 
     Returns:
-        Whether the complete reviewed required source job set has passed.
+        Whether complete required source evidence remained successful and current.
 
     """
-    ref, sha = f"refs/heads/{pr['head']['ref']}", pr["head"]["sha"]
-    if set(SOURCE_CHECKS) != set(WORKFLOWS) or "DCO sign-off" not in SOURCE_CHECKS.get(
-        "dco.yml", []
+    if (
+        set(SOURCE_CHECKS) != set(WORKFLOWS)
+        or "DCO sign-off" not in SOURCE_CHECKS.get("dco.yml", [])
+        or not source_identity(pr)
     ):
         return False
-    if not source_identity(pr):
+    sha, ref = pr["head"]["sha"], f"refs/heads/{pr['head']['ref']}"
+    statuses = read_statuses(sha) if statuses is None else statuses
+    SOURCE_EVIDENCE[sha] = {"runs": {}, "failures": []}
+    initial_event = SOURCE_HEAD == sha and SOURCE_ACTIVITY in {
+        "requested",
+        "in_progress",
+    }
+    if initial_event and not any(
+        status.get("description", "").startswith(SOURCE_REPORT)
+        for status in statuses.values()
+    ):
         return False
-    jobs = source_jobs(pr) if source_contract(pr) is not None else None
-    statuses = read_statuses(sha)
-    results = (
-        [
-            {"context": job["name"], "state": "success", "target_url": job["html_url"]}
-            for job in jobs
-        ]
-        if jobs
-        else []
+    jobs = (
+        source_jobs(pr, statuses)
+        if not initial_event and source_contract(pr) is not None
+        else None
+    )
+    if SOURCE_EVIDENCE[sha]["runs"] and not source_runs_current(pr):
+        source_jobs(pr, statuses)
+        if SOURCE_EVIDENCE[sha]["runs"] and not source_runs_current(pr):
+            SOURCE_EVIDENCE[sha]["failures"] = []
+        jobs = None
+    if not allow_success:
+        jobs = None
+    if jobs and source_contract(pr) is None:
+        jobs = None
+        SOURCE_EVIDENCE[sha]["failures"] = []
+    failed = SOURCE_EVIDENCE[sha]["failures"]
+    results = {
+        job["name"]: {
+            "context": job["name"],
+            "state": "success",
+            "target_url": job["html_url"],
+            "attempt": job["attempt"],
+        }
+        for job in jobs or []
+    }
+    results.update(
+        {
+            job["name"]: {
+                "context": job["name"],
+                "state": "failure",
+                "target_url": job["html_url"],
+                "attempt": job["attempt"],
+            }
+            for job in failed
+        }
     )
     for status in statuses.values():
-        if status.get("description", "").startswith(SOURCE_REPORT) and not jobs:
-            results.append(
-                {
-                    "context": status["context"],
-                    "state": "pending",
-                    "target_url": status["target_url"],
-                }
-            )
-    if jobs and source_contract(pr) is None:
-        return False
-    for result in results:
+        if (
+            status.get("description", "").startswith(SOURCE_REPORT)
+            and not jobs
+            and status["context"] not in results
+        ):
+            results[status["context"]] = {
+                "context": status["context"],
+                "state": "pending",
+                "target_url": status["target_url"],
+                "attempt": 0,
+            }
+    wrote = False
+    for result in results.values():
+        previous = statuses.get(result["context"], {})
+        description = f"{SOURCE_REPORT} result; attempt {result['attempt']}"
+        if (
+            previous.get("state") == result["state"]
+            and previous.get("target_url") == result["target_url"]
+            and previous.get("description") == description
+        ):
+            continue
         fresh = api(f"repos/{REPOSITORY}/pulls/{pr['number']}")
         if not source_identity(fresh) or fresh["head"]["sha"] != sha:
             return False
         current = api(f"repos/{REPOSITORY}/git/ref/{ref.removeprefix('refs/')}")
         if current["object"]["sha"] != sha:
             return False
-        previous = statuses.get(result["context"], {})
-        if (
-            previous.get("state") == result["state"]
-            and previous.get("target_url") == result["target_url"]
-        ):
-            continue
+        wrote = True
         api(
             f"repos/{REPOSITORY}/statuses/{sha}",
             "POST",
-            {**result, "description": f"{SOURCE_REPORT} result"},
+            {
+                "context": result["context"],
+                "state": result["state"],
+                "target_url": result["target_url"],
+                "description": description,
+            },
         )
+    if jobs and wrote and (not source_runs_current(pr) or source_contract(pr) is None):
+        reconcile_source(pr, allow_success=False)
+        return False
     return bool(jobs)
 
 
@@ -656,6 +787,8 @@ def main() -> None:
         subprocess.CalledProcessError: An API error other than a deleted ref occurred.
 
     """
+    SOURCE_CACHE.clear()
+    SOURCE_EVIDENCE.clear()
     wait_for_source_run(os.environ.get("SOURCE_RUN_ID", ""))
 
     # Pagination is bounded by GitHub's repository PR limit, not a waiting loop.
