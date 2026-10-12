@@ -934,6 +934,8 @@ class PackageSourceTests(unittest.TestCase):
             self.jobs[index] = [
                 {
                     "id": index * 10 + number,
+                    "run_id": index,
+                    "run_attempt": 1,
                     "name": name,
                     "head_sha": self.sha,
                     "status": "completed",
@@ -1152,6 +1154,10 @@ class PackageSourceTests(unittest.TestCase):
                     self.new_attempt = True
                 if invalid == "new_run":
                     self.new_run = True
+                if invalid == "job_attempt":
+                    self.jobs[2][0]["run_attempt"] = 2
+                if invalid == "job_run":
+                    self.jobs[2][0]["run_id"] = 9
                 self.assertFalse(self._report())
                 self.assertEqual(self.writes, [])
 
@@ -1211,6 +1217,7 @@ class PackageSourceTests(unittest.TestCase):
         self.runs["dco.yml"][0].update(run_attempt=2, conclusion="failure")
         self.jobs[2][0].update(
             id=25,
+            run_attempt=2,
             conclusion="failure",
             html_url=f"https://github.com/{queue.REPOSITORY}/actions/runs/2/job/25",
         )
@@ -1350,6 +1357,8 @@ class SourceBudgetTests(unittest.TestCase):
                 fixture.jobs[run_id] = [
                     {
                         "id": run_id * 100 + index,
+                        "run_id": run_id,
+                        "run_attempt": 1,
                         "name": name,
                         "head_sha": fixture.sha,
                         "status": "completed",

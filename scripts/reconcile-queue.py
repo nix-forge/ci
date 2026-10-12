@@ -641,7 +641,10 @@ def source_jobs(
             return None
         selected_jobs = batch["jobs"]
         if any(
-            job.get("head_sha") != sha or job.get("status") != "completed"
+            job.get("head_sha") != sha
+            or job.get("status") != "completed"
+            or job.get("run_id") != run["id"]
+            or job.get("run_attempt") != run["run_attempt"]
             for job in selected_jobs
         ):
             return None
