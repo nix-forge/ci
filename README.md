@@ -113,6 +113,24 @@ admission remains enabled. Same-repository Dependabot updates to existing action
 SHA pins can enter automatically after full immutable workflow blobs prove that
 only pins and version comments changed. Runtime code, permissions, renamed or
 new workflows, and other automation changes still require deliberate admission.
+A package repository can opt in to dispatched source-PR result reporting with
+`package-source-checks`, a JSON object mapping each configured workflow filename
+to its required job names. Include every protected context exactly once and
+include `dco.yml` with `DCO sign-off`. Keep this map aligned with branch protection.
+The source adapter accepts only open, non-draft, same-repository PRs from the
+GitHub Actions bot on `automation/package-updates-<package>` branches. It proves
+one actual parent on protected default-branch history, changes limited to the
+selected `pkgs/by-name/<prefix>/<package>/` directory and `docs/catalog.md`, and
+workflow blobs identical to current protected main. It executes no PR code.
+
+Source statuses link actual successful required jobs only after every configured
+workflow and required job passes on the exact source SHA. A blocked approval run
+can be ignored only when its jobs endpoint proves zero jobs. Failed, pending,
+skipped, missing, stale and untrusted evidence never becomes success; newer
+attempts invalidate older source adapter results. Normal required checks and
+expected-head merge-queue admission still apply. This opt-in adds no token
+permissions and leaves existing synthetic queue result reporting unchanged.
+
 Set `base-sha-workflows: '["ci.yml"]'` for a workflow that declares a `base_sha`
 dispatch input. This supplies the queue commit's first parent for derivation
 comparison without teaching the shared library repository names.

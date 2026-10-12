@@ -28,6 +28,8 @@ AUTOMATION_BRANCH = os.environ.get("AUTOMATION_BRANCH", "")
 BASE_SHA_WORKFLOWS = json.loads(os.environ.get("BASE_SHA_WORKFLOWS", "[]"))
 QUEUE_PREFIX = f"refs/heads/gh-readonly-queue/{DEFAULT_BRANCH}/"
 ADMISSION = "Merge queue admission"
+SOURCE_CHECKS = json.loads(os.environ.get("PACKAGE_SOURCE_CHECKS", "{}"))
+SOURCE_REPORT = "Mirrored package source job"
 PAGE_SIZE = 100
 GH = shutil.which("gh") or "/usr/bin/gh"
 
@@ -76,10 +78,17 @@ def admit(pr: dict[str, Any]) -> bool:
         Whether this trusted PR is now queued and may need a validation ref.
 
     """
-    trusted = pr["user"]["login"] == "dependabot[bot]" or (
-        bool(AUTOMATION_BRANCH)
-        and pr["user"]["login"] == "github-actions[bot]"
-        and pr["head"]["ref"] == AUTOMATION_BRANCH
+    source = bool(SOURCE_CHECKS) and source_identity(pr)
+    if source and not reconcile_source(pr):
+        return False
+    trusted = (
+        source
+        or pr["user"]["login"] == "dependabot[bot]"
+        or (
+            bool(AUTOMATION_BRANCH)
+            and pr["user"]["login"] == "github-actions[bot]"
+            and pr["head"]["ref"] == AUTOMATION_BRANCH
+        )
     )
     if (
         not trusted
@@ -376,6 +385,268 @@ def front_queue_entry() -> dict[str, Any] | None:
     merge_queue = repository["mergeQueue"]
     entries = merge_queue["entries"]["nodes"] if merge_queue else []
     return entries[0] if entries else None
+
+
+def source_identity(pr: dict[str, Any]) -> bool:
+    """Limit opt-in source reconciliation to the package updater's bot PRs.
+
+    Returns:
+        Whether identity and namespace are eligible for immutable inspection.
+
+    """
+    return (
+        pr.get("state") == "open"
+        and not pr.get("draft", True)
+        and pr.get("user", {}).get("id") == 41898282
+        and pr["user"].get("type") == "Bot"
+        and pr["user"].get("login") == "github-actions[bot]"
+        and (pr.get("head", {}).get("repo") or {}).get("full_name") == REPOSITORY
+        and (pr.get("base", {}).get("repo") or {}).get("full_name") == REPOSITORY
+        and pr["base"].get("ref") == DEFAULT_BRANCH
+        and re.fullmatch(
+            r"automation/package-updates-[a-z0-9][a-z0-9+._-]*",
+            pr["head"].get("ref", ""),
+        )
+        is not None
+        and re.fullmatch(r"[0-9a-f]{40}", pr["head"].get("sha", "")) is not None
+    )
+
+
+def source_contract(pr: dict[str, Any]) -> str | None:
+    """Prove the real source parent, owned paths and current workflow identities.
+
+    Returns:
+        The exact protected base, or None for an untrusted or stale source.
+
+    """
+    sha = pr["head"]["sha"]
+    commit = api(f"repos/{REPOSITORY}/git/commits/{sha}")
+    parents = commit.get("parents", [])
+    if len(parents) != 1:
+        return None
+    base = parents[0]["sha"]
+    if re.fullmatch(r"[0-9a-f]{40}", base) is None:
+        return None
+    protected = api(
+        f"repos/{REPOSITORY}/git/ref/heads/{quote(DEFAULT_BRANCH, safe='')}"
+    )["object"]["sha"]
+    comparison = api(f"repos/{REPOSITORY}/compare/{base}...{protected}")
+    if comparison.get("status") not in {"ahead", "identical"}:
+        return None
+    changes = api(f"repos/{REPOSITORY}/compare/{base}...{sha}")
+    files = changes.get("files", [])
+    package = pr["head"]["ref"].removeprefix("automation/package-updates-")
+    prefix = f"pkgs/by-name/{package[:2]}/{package}/"
+    if (
+        changes.get("status") != "ahead"
+        or changes.get("total_commits") != 1
+        or not files
+        or len(files) >= 300
+        or not any(item["filename"].startswith(prefix) for item in files)
+        or any(
+            item.get("status") == "renamed"
+            or not (
+                item["filename"].startswith(prefix)
+                or item["filename"] == "docs/catalog.md"
+            )
+            for item in files
+        )
+    ):
+        return None
+    trees = []
+    for revision in (sha, protected):
+        tree = api(f"repos/{REPOSITORY}/git/trees/{revision}?recursive=1")
+        if tree.get("truncated") is not False:
+            return None
+        trees.append({item["path"]: item for item in tree["tree"]})
+    for workflow in WORKFLOWS:
+        path = f".github/workflows/{workflow}"
+        old, current = (tree.get(path, {}) for tree in trees)
+        if (
+            not old.get("sha")
+            or old.get("sha") != current.get("sha")
+            or old.get("mode") != "100644"
+            or current.get("mode") != "100644"
+            or old.get("type") != "blob"
+            or current.get("type") != "blob"
+        ):
+            return None
+    return base
+
+
+def source_jobs(pr: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Read the latest actual validation attempt for every trusted workflow.
+
+    Returns:
+        Its real completed jobs, or None while evidence is missing or pending.
+
+    """
+    jobs: list[dict[str, Any]] = []
+    sha, branch = pr["head"]["sha"], pr["head"]["ref"]
+    for workflow in WORKFLOWS:
+        metadata = api(f"repos/{REPOSITORY}/actions/workflows/{workflow}")
+        path = f".github/workflows/{workflow}"
+        if metadata.get("path") != path or metadata.get("state") != "active":
+            return None
+        response = api(
+            f"repos/{REPOSITORY}/actions/workflows/{workflow}/runs?head_sha={sha}&per_page={PAGE_SIZE}"
+        )
+        if response["total_count"] > PAGE_SIZE:
+            return None
+        selected = None
+        selected_jobs = []
+        for run in response["workflow_runs"]:
+            if not (
+                run.get("workflow_id") == metadata["id"]
+                and run.get("path") == path
+                and run.get("head_sha") == sha
+                and run.get("head_branch") == branch
+                and run.get("repository", {}).get("full_name") == REPOSITORY
+                and run.get("head_repository", {}).get("full_name") == REPOSITORY
+                and run.get("event") in {"pull_request", "workflow_dispatch"}
+                and isinstance(run.get("id"), int)
+                and run["id"] > 0
+                and isinstance(run.get("run_attempt"), int)
+                and run["run_attempt"] > 0
+            ):
+                continue
+            batch = api(
+                f"repos/{REPOSITORY}/actions/runs/{run['id']}/jobs?filter=latest&per_page={PAGE_SIZE}"
+            )
+            if batch["total_count"] > PAGE_SIZE:
+                return None
+            if (
+                run.get("status") == "completed"
+                and run.get("conclusion") == "action_required"
+                and batch["total_count"] == 0
+                and batch["jobs"] == []
+            ):
+                continue
+            selected, selected_jobs = run, batch["jobs"]
+            break
+        if selected is None or selected.get("status") != "completed":
+            return None
+        history = api(
+            f"repos/{REPOSITORY}/actions/workflows/{workflow}/runs?head_sha={sha}&per_page={PAGE_SIZE}"
+        )
+        if history["total_count"] > PAGE_SIZE:
+            return None
+        fresh = next(
+            (
+                run
+                for run in history["workflow_runs"]
+                if run.get("id") == selected["id"]
+            ),
+            {},
+        )
+        position = next(
+            (
+                index
+                for index, run in enumerate(history["workflow_runs"])
+                if run.get("id") == selected["id"]
+            ),
+            None,
+        )
+        if position is None:
+            return None
+        for newer in history["workflow_runs"][:position]:
+            if (
+                newer.get("head_sha") != sha
+                or newer.get("workflow_id") != metadata["id"]
+            ):
+                return None
+            batch = api(
+                f"repos/{REPOSITORY}/actions/runs/{newer['id']}/jobs?filter=latest&per_page={PAGE_SIZE}"
+            )
+            if not (
+                newer.get("status") == "completed"
+                and newer.get("conclusion") == "action_required"
+                and batch.get("total_count") == 0
+                and batch.get("jobs") == []
+            ):
+                return None
+        fresh_attempt = api(f"repos/{REPOSITORY}/actions/runs/{selected['id']}")
+        if fresh != selected or fresh_attempt.get("run_attempt") != selected.get(
+            "run_attempt"
+        ):
+            return None
+        if any(
+            fresh.get(key) != selected.get(key)
+            for key in ("head_sha", "run_attempt", "status", "conclusion")
+        ):
+            return None
+        if selected.get("conclusion") != "success" or any(
+            job.get("head_sha") != sha or job.get("status") != "completed"
+            for job in selected_jobs
+        ):
+            return None
+        for context in SOURCE_CHECKS[workflow]:
+            matches = [job for job in selected_jobs if job.get("name") == context]
+            if len(matches) != 1 or matches[0].get("conclusion") != "success":
+                return None
+            job = matches[0]
+            if not job.get("html_url", "").startswith(
+                f"https://github.com/{REPOSITORY}/actions/runs/{selected['id']}/job/"
+            ):
+                return None
+            jobs.append(job)
+    return jobs
+
+
+def reconcile_source(pr: dict[str, Any]) -> bool:
+    """Expose only verified source results, preserving failures and pending work.
+
+    Returns:
+        Whether the complete reviewed required source job set has passed.
+
+    """
+    ref, sha = f"refs/heads/{pr['head']['ref']}", pr["head"]["sha"]
+    if set(SOURCE_CHECKS) != set(WORKFLOWS) or "DCO sign-off" not in SOURCE_CHECKS.get(
+        "dco.yml", []
+    ):
+        return False
+    if not source_identity(pr):
+        return False
+    jobs = source_jobs(pr) if source_contract(pr) is not None else None
+    statuses = read_statuses(sha)
+    results = (
+        [
+            {"context": job["name"], "state": "success", "target_url": job["html_url"]}
+            for job in jobs
+        ]
+        if jobs
+        else []
+    )
+    for status in statuses.values():
+        if status.get("description", "").startswith(SOURCE_REPORT) and not jobs:
+            results.append(
+                {
+                    "context": status["context"],
+                    "state": "pending",
+                    "target_url": status["target_url"],
+                }
+            )
+    if jobs and source_contract(pr) is None:
+        return False
+    for result in results:
+        fresh = api(f"repos/{REPOSITORY}/pulls/{pr['number']}")
+        if not source_identity(fresh) or fresh["head"]["sha"] != sha:
+            return False
+        current = api(f"repos/{REPOSITORY}/git/ref/{ref.removeprefix('refs/')}")
+        if current["object"]["sha"] != sha:
+            return False
+        previous = statuses.get(result["context"], {})
+        if (
+            previous.get("state") == result["state"]
+            and previous.get("target_url") == result["target_url"]
+        ):
+            continue
+        api(
+            f"repos/{REPOSITORY}/statuses/{sha}",
+            "POST",
+            {**result, "description": f"{SOURCE_REPORT} result"},
+        )
+    return bool(jobs)
 
 
 def main() -> None:

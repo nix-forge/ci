@@ -7,6 +7,9 @@ inputs:
   automation-branch:
     description: Optional same-repository github-actions bot branch eligible for admission.
     default: ''
+  package-source-checks:
+    description: Opt-in JSON workflow-to-required-job map for same-repository package updater source PRs.
+    default: '{}'
   base-sha-workflows:
     description: JSON array of workflows accepting the base_sha dispatch input.
     default: '[]'
@@ -19,6 +22,7 @@ runs:
     - name: Validate queue inputs
       shell: bash
       env:
+        PACKAGE_SOURCE_CHECKS: ${{ inputs.package-source-checks }}
         AUTOMATION_BRANCH: ${{ inputs.automation-branch }}
         BASE_SHA_WORKFLOWS: ${{ inputs.base-sha-workflows }}
         QUEUE_WORKFLOWS: ${{ inputs.workflows }}
@@ -33,19 +37,32 @@ runs:
           printf 'Invalid automation-branch input: %s\n' "$AUTOMATION_BRANCH" >&2
           exit 1
         fi
-        python3 - "$QUEUE_WORKFLOWS" "$BASE_SHA_WORKFLOWS" <<'PY'
+        python3 - "$QUEUE_WORKFLOWS" "$BASE_SHA_WORKFLOWS" "$PACKAGE_SOURCE_CHECKS" <<'PY'
         import json
         import re
         import sys
 
         workflow_pattern = re.compile(r"^[A-Za-z0-9._/-]+\.yml$")
-        for label, value in zip(("workflows", "base-sha-workflows"), sys.argv[1:]):
+        for label, value in zip(("workflows", "base-sha-workflows"), sys.argv[1:3]):
             entries = json.loads(value)
             if not isinstance(entries, list) or not all(
                 isinstance(entry, str) and workflow_pattern.fullmatch(entry)
                 for entry in entries
             ):
                 raise SystemExit(f"Invalid {label} input")
+        source = json.loads(sys.argv[3])
+        if not isinstance(source, dict) or any(
+            not workflow_pattern.fullmatch(key) or not isinstance(jobs, list) or not jobs
+            or any(not isinstance(job, str) or not job or len(job) > 256 for job in jobs)
+            or len(jobs) != len(set(jobs))
+            for key, jobs in source.items()
+        ):
+            raise SystemExit("Invalid package-source-checks input")
+        contexts = [job for jobs in source.values() for job in jobs]
+        if len(contexts) != len(set(contexts)):
+            raise SystemExit("Source required job names must be unique")
+        if source and (set(source) != set(json.loads(sys.argv[1])) or "DCO sign-off" not in source.get("dco.yml", [])):
+            raise SystemExit("Source checks must cover every workflow, including actual source DCO")
         PY
     - name: Set up queue validation Python
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -66,6 +83,7 @@ runs:
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
         DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        PACKAGE_SOURCE_CHECKS: ${{ inputs.package-source-checks }}
         AUTOMATION_BRANCH: ${{ inputs.automation-branch }}
         BASE_SHA_WORKFLOWS: ${{ inputs.base-sha-workflows }}
         QUEUE_WORKFLOWS: ${{ inputs.workflows }}
