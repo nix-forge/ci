@@ -28,6 +28,7 @@ jobs:
       RELEASE_NOTES_DIRECTORY: ${{ inputs.release_notes_directory }}
       TAG: ${{ github.ref_name }}
       COMMIT: ${{ github.sha }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
       - name: Check out the tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,6 +46,8 @@ jobs:
           [[ "$RELEASE_NOTES_DIRECTORY" != /* && "$RELEASE_NOTES_DIRECTORY" != *..* ]]
           tag_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
           [[ "$tag_commit" == "$COMMIT" ]]
+          # Publish source only from history already admitted through main's rules.
+          git merge-base --is-ancestor "$COMMIT" "origin/$DEFAULT_BRANCH"
           notes="$RELEASE_NOTES_DIRECTORY/$TAG.md"
           test -s "$notes"
           grep -q '^## Changelog$' "$notes"
