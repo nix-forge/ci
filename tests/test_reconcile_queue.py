@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import os
 import subprocess
@@ -183,6 +184,30 @@ class ReconcileTests(unittest.TestCase):
                 self.changed_files = [{"filename": filename}]
                 self.assertEqual(self.run_queue().call_count, 0)
                 self.assertEqual(self.writes, [])
+
+    def test_proven_dependabot_pin_update_reaches_required_checks(self) -> None:
+        self.changed_files = [
+            {"filename": ".github/workflows/ci.yml", "status": "modified"}
+        ]
+        with patch.object(queue, "safe_pin_update", return_value=True) as proof:
+            graphql = self.run_queue()
+        proof.assert_called_once_with(self.pr, self.changed_files[0])
+        self.assertEqual(graphql.call_count, 2)
+        self.assertEqual(graphql.call_args.kwargs["sha"], self.pr["head"]["sha"])
+
+    def test_package_bot_cannot_use_dependabot_pin_exception(self) -> None:
+        self.changed_files = [
+            {"filename": ".github/workflows/ci.yml", "status": "modified"}
+        ]
+        self.pr["user"]["login"] = "github-actions[bot]"
+        self.pr["head"]["ref"] = "automation/updates"
+        with (
+            patch.object(queue, "AUTOMATION_BRANCH", "automation/updates"),
+            patch.object(queue, "safe_pin_update", return_value=True) as proof,
+        ):
+            self.assertEqual(self.run_queue().call_count, 0)
+        proof.assert_not_called()
+        self.assertEqual(self.writes, [])
 
     def test_renaming_automation_requires_human_admission(self) -> None:
         self.changed_files = [
@@ -402,6 +427,143 @@ class ReconcileTests(unittest.TestCase):
         ):
             queue.main()
         self.assertEqual(dispatch.call_count, len(self.refs))
+
+
+class PinAdmissionTests(unittest.TestCase):
+    """Allow immutable pin edits without trusting patches or executing PR code."""
+
+    def setUp(self) -> None:
+        self.filename = ".github/workflows/ci.yml"
+        self.pr = {"base": {"sha": "a" * 40}, "head": {"sha": "b" * 40}}
+        self.item = {"filename": self.filename, "status": "modified"}
+        self.old = (
+            "jobs:\n  check:\n    steps:\n      - uses: actions/checkout@"
+            + "c" * 40
+            + " # v1.0.0\n"
+        )
+        self.new = self.old.replace("c" * 40, "d" * 40).replace("v1.0.0", "v1.0.1")
+        self.mode = "100644"
+        self.truncated = False
+        self.encoding = "base64"
+
+    def api(self, path: str, method: str = "GET", data: object = None) -> Any:
+        self.assertEqual(method, "GET")
+        if "/git/trees/" in path:
+            old = "a" * 40 in path
+            return {
+                "truncated": self.truncated,
+                "tree": [
+                    {
+                        "path": self.filename,
+                        "mode": self.mode,
+                        "type": "blob",
+                        "sha": "old" if old else "new",
+                    }
+                ],
+            }
+        if "/git/blobs/" in path:
+            content = self.old if path.endswith("old") else self.new
+            return {
+                "encoding": self.encoding,
+                "size": len(content.encode()),
+                "content": base64.b64encode(content.encode()).decode(),
+            }
+        raise AssertionError(path)
+
+    def allowed(self) -> bool:
+        with patch.object(queue, "api", side_effect=self.api):
+            return queue.safe_pin_update(self.pr, self.item)
+
+    def test_complete_blob_pin_edit_is_allowed(self) -> None:
+        self.assertTrue(self.allowed())
+
+    def test_action_and_template_metadata_are_allowed(self) -> None:
+        for name in [
+            "actions/setup/action.yml",
+            ".github/actions/setup/action.yaml",
+            "workflow-templates/check.yml",
+        ]:
+            with self.subTest(name=name):
+                self.filename = name
+                self.item["filename"] = name
+                self.assertTrue(self.allowed())
+
+    def test_semantic_changes_are_rejected(self) -> None:
+        for change in [
+            self.new + "permissions: write-all\n",
+            self.new.replace("actions/checkout", "attacker/checkout"),
+            self.new.replace("uses:", "run:"),
+            self.new.replace("d" * 40, "main"),
+            self.new.replace("      -", "    -"),
+            self.new.replace("# v1.0.1", "# arbitrary policy change"),
+            self.new.replace("jobs:", "on:"),
+            self.new.replace("\n", "\r\n"),
+        ]:
+            with self.subTest(change=change):
+                self.new = change
+                self.assertFalse(self.allowed())
+
+    def test_new_renamed_deleted_or_nonmetadata_files_are_rejected(self) -> None:
+        for status in ["added", "removed", "renamed"]:
+            self.item["status"] = status
+            self.assertFalse(self.allowed())
+        self.item["status"] = "modified"
+        for name in [
+            "scripts/check.py",
+            "actions/setup/main.js",
+            ".github/workflows/nested/check.yml",
+            "workflow-templates/check.properties.json",
+            "actions/../check/action.yml",
+        ]:
+            self.item["filename"] = name
+            self.assertFalse(self.allowed())
+
+    def test_missing_binary_oversized_or_mode_changed_blobs_are_rejected(self) -> None:
+        self.mode = "100755"
+        self.assertFalse(self.allowed())
+        self.mode = "120000"
+        self.assertFalse(self.allowed())
+        self.mode = "100644"
+        self.truncated = True
+        self.assertFalse(self.allowed())
+        self.truncated = False
+        self.encoding = "none"
+        self.assertFalse(self.allowed())
+        self.encoding = "base64"
+        self.new = "\0" + self.new
+        self.assertFalse(self.allowed())
+        self.new = "x" * (1024 * 1024 + 1)
+        self.assertFalse(self.allowed())
+        self.pr["head"]["sha"] = "main"
+        self.assertFalse(self.allowed())
+
+    def test_action_text_inside_runtime_script_is_not_metadata(self) -> None:
+        for scalar in ["|", ">-", "|2"]:
+            self.old = (
+                "steps:\n  - run: "
+                + scalar
+                + "\n      uses: actions/checkout@"
+                + "c" * 40
+                + "\n"
+            )
+            self.new = self.old.replace("c" * 40, "d" * 40)
+            self.assertFalse(self.allowed())
+
+    def test_multiline_quoted_runtime_script_is_not_metadata(self) -> None:
+        self.old = (
+            'steps:\n  - run: "echo start\n      uses: actions/checkout@'
+            + "c" * 40
+            + '\n      echo end"\n'
+        )
+        self.new = self.old.replace("c" * 40, "d" * 40)
+        self.assertFalse(self.allowed())
+
+    def test_api_failure_never_admits(self) -> None:
+        with (
+            patch.object(queue, "api", side_effect=RuntimeError("unavailable")),
+            self.assertRaises(RuntimeError),
+        ):
+            queue.safe_pin_update(self.pr, self.item)
 
 
 class DispatchResultTests(unittest.TestCase):

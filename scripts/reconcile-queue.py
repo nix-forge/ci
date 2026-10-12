@@ -7,8 +7,11 @@ Only GitHub API metadata is read. No PR files, artifacts, or commands are run.
 # ruff: file-ignore[suspicious-subprocess-import, subprocess-without-shell-equals-true, print]
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -88,7 +91,13 @@ def admit(pr: dict[str, Any]) -> bool:
         files = api(
             f"repos/{REPOSITORY}/pulls/{number}/files?per_page={PAGE_SIZE}&page={page}"
         )
-        if any(automation_file(item) for item in files):
+        if any(
+            automation_file(item)
+            and not (
+                pr["user"]["login"] == "dependabot[bot]" and safe_pin_update(pr, item)
+            )
+            for item in files
+        ):
             print(f"PR #{number}: automation changes require maintainer review")
             return False
         if len(files) < PAGE_SIZE:
@@ -167,6 +176,109 @@ def automation_file(item: dict[str, str]) -> bool:
     paths = (item["filename"], item.get("previous_filename", ""))
     prefixes = (".github/", "actions/", "scripts/", "workflow-templates/")
     return any(path.startswith(prefixes) for path in paths)
+
+
+MAX_PIN_FILE_BYTES = 1024 * 1024
+PIN_LINE = re.compile(
+    r"(?P<prefix> +(?:- +)?uses: +)(?P<action>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)"
+    r"@(?P<sha>[0-9a-f]{40})(?P<comment> *(?:#[^\r\n]*)?)(?P<ending>\n?)"
+)
+VERSION_COMMENT = re.compile(r" +# v?[0-9]+(?:\.[0-9]+)*(?:[-+][A-Za-z0-9.-]+)?")
+
+
+def safe_pin_update(pr: dict[str, Any], item: dict[str, str]) -> bool:
+    """Prove a modified metadata file changes only existing external SHA pins.
+
+    Read complete immutable Git blobs, never execute PR code or trust the
+    possibly truncated diff returned by the pull-request files endpoint.
+    API errors abort reconciliation before any admission.
+
+    Returns:
+        Whether every changed byte is an allowed SHA or version comment.
+
+    """
+    filename = item["filename"]
+    if item.get("status") != "modified" or item.get("previous_filename"):
+        return False
+    if any(part in {"", ".", ".."} for part in filename.split("/")):
+        return False
+    if not re.fullmatch(
+        r"(?:\.github/workflows/[^/]+\.ya?ml|workflow-templates/[^/]+\.ya?ml|"
+        r"(?:\.github/)?actions/(?:[^/]+/)+action\.ya?ml)",
+        filename,
+    ):
+        return False
+    contents = []
+    for side in ("base", "head"):
+        ref = pr.get(side, {}).get("sha", "")
+        if not re.fullmatch(r"[0-9a-f]{40}", ref):
+            return False
+        tree = api(f"repos/{REPOSITORY}/git/trees/{ref}?recursive=1")
+        if tree.get("truncated") is not False:
+            return False
+        entries = [entry for entry in tree.get("tree", []) if entry["path"] == filename]
+        if len(entries) != 1:
+            return False
+        entry = entries[0]
+        if entry.get("mode") != "100644" or entry.get("type") != "blob":
+            return False
+        blob = api(f"repos/{REPOSITORY}/git/blobs/{entry['sha']}")
+        size = blob.get("size")
+        if (
+            blob.get("encoding") != "base64"
+            or not isinstance(size, int)
+            or not 0 < size <= MAX_PIN_FILE_BYTES
+            or not isinstance(blob.get("content"), str)
+            or len(blob["content"]) > MAX_PIN_FILE_BYTES * 2
+        ):
+            return False
+        try:
+            raw = base64.b64decode("".join(blob["content"].split()), validate=True)
+            text = raw.decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError):
+            return False
+        if len(raw) != size or "\0" in text or "\r" in text:
+            return False
+        contents.append(text.splitlines(keepends=True))
+    before, after = contents
+    if len(before) != len(after):
+        return False
+    changed = False
+    scalar_indent = None
+    for old, new in zip(before, after, strict=True):
+        indentation = len(old) - len(old.lstrip(" "))
+        if old.strip() and scalar_indent is not None and indentation <= scalar_indent:
+            scalar_indent = None
+        in_scalar = scalar_indent is not None
+        # Multiline quoted YAML scalars need a full parser. Leave these files
+        # for review rather than treating scalar text as an action key.
+        quoted = re.search(r": +(['\"])(.*)\n?$", old)
+        if (
+            not in_scalar
+            and quoted
+            and not re.search(re.escape(quoted[1]) + r" *(?:#[^\n]*)?\n?$", quoted[2])
+        ):
+            return False
+        # Block scalar contents are runtime commands or data, not action keys.
+        if re.search(r": +[|>][0-9+-]* *(?:#[^\n]*)?\n?$", old):
+            scalar_indent = indentation
+        if in_scalar and old != new:
+            return False
+        if old == new:
+            continue
+        old_pin, new_pin = PIN_LINE.fullmatch(old), PIN_LINE.fullmatch(new)
+        if old_pin is None or new_pin is None:
+            return False
+        if any(old_pin[key] != new_pin[key] for key in ("prefix", "action", "ending")):
+            return False
+        if old_pin["sha"] == new_pin["sha"]:
+            return False
+        if old_pin["comment"] != new_pin["comment"] and not all(
+            VERSION_COMMENT.fullmatch(pin["comment"]) for pin in (old_pin, new_pin)
+        ):
+            return False
+        changed = True
+    return changed
 
 
 def wait_for_source_run(run_id: str) -> None:
