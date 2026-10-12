@@ -19,6 +19,8 @@ import time
 from typing import Any
 from urllib.parse import quote
 
+import yaml
+
 REPOSITORY = os.environ["GH_REPO"]
 WORKFLOWS = json.loads(os.environ["QUEUE_WORKFLOWS"])
 DEFAULT_BRANCH = os.environ.get("DEFAULT_BRANCH", "main")
@@ -244,29 +246,16 @@ def safe_pin_update(pr: dict[str, Any], item: dict[str, str]) -> bool:
     before, after = contents
     if len(before) != len(after):
         return False
+    old_lines = action_pin_lines("".join(before), filename)
+    new_lines = action_pin_lines("".join(after), filename)
+    if old_lines is None or new_lines is None:
+        return False
     changed = False
-    scalar_indent = None
-    for old, new in zip(before, after, strict=True):
-        indentation = len(old) - len(old.lstrip(" "))
-        if old.strip() and scalar_indent is not None and indentation <= scalar_indent:
-            scalar_indent = None
-        in_scalar = scalar_indent is not None
-        # Multiline quoted YAML scalars need a full parser. Leave these files
-        # for review rather than treating scalar text as an action key.
-        quoted = re.search(r": +(['\"])(.*)\n?$", old)
-        if (
-            not in_scalar
-            and quoted
-            and not re.search(re.escape(quoted[1]) + r" *(?:#[^\n]*)?\n?$", quoted[2])
-        ):
-            return False
-        # Block scalar contents are runtime commands or data, not action keys.
-        if re.search(r": +[|>][0-9+-]* *(?:#[^\n]*)?\n?$", old):
-            scalar_indent = indentation
-        if in_scalar and old != new:
-            return False
+    for index, (old, new) in enumerate(zip(before, after, strict=True)):
         if old == new:
             continue
+        if index not in old_lines or index not in new_lines:
+            return False
         old_pin, new_pin = PIN_LINE.fullmatch(old), PIN_LINE.fullmatch(new)
         if old_pin is None or new_pin is None:
             return False
@@ -280,6 +269,73 @@ def safe_pin_update(pr: dict[str, Any], item: dict[str, str]) -> bool:
             return False
         changed = True
     return changed
+
+
+def action_pin_lines(text: str, filename: str) -> set[int] | None:
+    """Locate actual job and step action fields without constructing YAML objects.
+
+    Returns:
+        Scalar value line numbers, or None for ambiguous or invalid YAML.
+
+    """
+
+    def fields(node: yaml.Node) -> dict[str, yaml.Node]:
+        if not isinstance(node, yaml.MappingNode):
+            raise TypeError
+        result = {}
+        for key, value in node.value:
+            if not isinstance(key, yaml.ScalarNode) or key.value in result:
+                raise ValueError
+            result[key.value] = value
+        return result
+
+    lines: set[int] = set()
+
+    def action(mapping: dict[str, yaml.Node]) -> None:
+        node = mapping.get("uses")
+        if (
+            isinstance(node, yaml.ScalarNode)
+            and "run" not in mapping
+            and node.start_mark.line == node.end_mark.line
+            and re.fullmatch(
+                r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*@[0-9a-f]{40}",
+                node.value,
+            )
+        ):
+            lines.add(node.start_mark.line)
+
+    def steps(node: yaml.Node | None) -> None:
+        if node is None:
+            return
+        if not isinstance(node, yaml.SequenceNode):
+            raise TypeError
+        for step in node.value:
+            action(fields(step))
+
+    try:
+        # Aliases may share an action scalar with runtime env or command data.
+        # Reject their documents instead of assuming the scalar has one use.
+        if any(
+            isinstance(token, (yaml.AnchorToken, yaml.AliasToken))
+            for token in yaml.scan(text)
+        ):
+            return None
+        root = yaml.compose(text, Loader=yaml.BaseLoader)
+        mapping = fields(root)
+        if filename.endswith(("/action.yml", "/action.yaml")):
+            runs = fields(mapping["runs"])
+            using = runs.get("using")
+            if not isinstance(using, yaml.ScalarNode) or using.value != "composite":
+                return None
+            steps(runs.get("steps"))
+        else:
+            for job in fields(mapping["jobs"]).values():
+                definition = fields(job)
+                action(definition)
+                steps(definition.get("steps"))
+    except (yaml.YAMLError, ValueError, TypeError, KeyError, RecursionError):
+        return None
+    return lines
 
 
 def wait_for_source_run(run_id: str) -> None:

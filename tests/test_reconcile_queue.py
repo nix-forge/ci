@@ -486,7 +486,70 @@ class PinAdmissionTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.filename = name
                 self.item["filename"] = name
+                if name.startswith("workflow-templates/"):
+                    self.old = (
+                        "jobs:\n  check:\n    steps:\n      - uses: actions/checkout@"
+                        + "c" * 40
+                        + " # v1.0.0\n"
+                    )
+                    self.new = self.old.replace("c" * 40, "d" * 40).replace(
+                        "v1.0.0", "v1.0.1"
+                    )
+                else:
+                    self.old = (
+                        "runs:\n  using: composite\n  steps:\n    - uses: actions/checkout@"
+                        + "c" * 40
+                        + " # v1.0.0\n"
+                    )
+                    self.new = self.old.replace("c" * 40, "d" * 40).replace(
+                        "v1.0.0", "v1.0.1"
+                    )
                 self.assertTrue(self.allowed())
+
+    def test_reusable_job_pin_is_allowed(self) -> None:
+        self.old = (
+            "jobs:\n  check:\n    uses: nix-forge/ci/.github/workflows/ci.yml@"
+            + "c" * 40
+            + " # v1.0.0\n"
+        )
+        self.new = self.old.replace("c" * 40, "d" * 40).replace("v1.0.0", "v1.0.1")
+        self.assertTrue(self.allowed())
+
+    def test_runtime_env_uses_value_is_not_an_action(self) -> None:
+        for context in [
+            "env:\n  uses: ",
+            "jobs:\n  check:\n    env:\n      uses: ",
+            "jobs:\n  check:\n    steps:\n      - run: echo safe\n        env:\n          uses: ",
+        ]:
+            self.old = context + "actions/checkout@" + "c" * 40 + "\n"
+            self.new = self.old.replace("c" * 40, "d" * 40)
+            self.assertFalse(self.allowed())
+
+    def test_tagged_or_anchored_runtime_scalar_is_not_an_action(self) -> None:
+        for scalar in ["&script |", "!!str |", "!!str >-", "!runtime |"]:
+            self.old = (
+                "jobs:\n  check:\n    steps:\n      - run: "
+                + scalar
+                + "\n          uses: actions/checkout@"
+                + "c" * 40
+                + "\n"
+            )
+            self.new = self.old.replace("c" * 40, "d" * 40)
+            self.assertFalse(self.allowed())
+
+    def test_alias_sharing_action_pin_with_runtime_data_is_rejected(self) -> None:
+        self.old = (
+            "jobs:\n  check:\n    steps:\n      - uses: &pin actions/checkout@"
+            + "c" * 40
+            + "\n    env:\n      PIN: *pin\n"
+        )
+        self.new = self.old.replace("c" * 40, "d" * 40)
+        self.assertFalse(self.allowed())
+
+    def test_duplicate_action_fields_are_rejected(self) -> None:
+        self.old += "        uses: actions/setup-python@" + "e" * 40 + "\n"
+        self.new = self.old.replace("c" * 40, "d" * 40)
+        self.assertFalse(self.allowed())
 
     def test_semantic_changes_are_rejected(self) -> None:
         for change in [
