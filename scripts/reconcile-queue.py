@@ -1,6 +1,7 @@
 """Admit passing bot PRs and dispatch CI suppressed by GITHUB_TOKEN.
 
-Only GitHub API metadata is read. No PR files, artifacts, or commands are run.
+GitHub API metadata and immutable workflow blobs prove pin-only changes.
+No PR code, artifacts, or commands are executed.
 """
 
 # Fixed GitHub CLI invocations use argv without a shell; progress goes to Actions logs.
