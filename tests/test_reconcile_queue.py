@@ -890,5 +890,566 @@ class CompletionTests(unittest.TestCase):
         api.assert_not_called()
 
 
+class PackageSourceTests(unittest.TestCase):
+    """Exercise opted-in source proof with real REST response shapes."""
+
+    def setUp(self) -> None:
+        self.sha, self.base = "a" * 40, "b" * 40
+        self.branch = "automation/package-updates-example"
+        self.pr = {
+            "state": "open",
+            "draft": False,
+            "number": 7,
+            "node_id": "PR_7",
+            "user": {"login": "github-actions[bot]", "type": "Bot", "id": 41898282},
+            "head": {
+                "sha": self.sha,
+                "ref": self.branch,
+                "repo": {"full_name": queue.REPOSITORY},
+            },
+            "base": {
+                "ref": queue.DEFAULT_BRANCH,
+                "repo": {"full_name": queue.REPOSITORY},
+            },
+        }
+        self.checks = {"ci.yml": ["Build", "Lint"], "dco.yml": ["DCO sign-off"]}
+        self.runs = {}
+        self.jobs = {}
+        for index, workflow in enumerate(self.checks, 1):
+            self.runs[workflow] = [
+                {
+                    "id": index,
+                    "workflow_id": index,
+                    "path": f".github/workflows/{workflow}",
+                    "head_sha": self.sha,
+                    "head_branch": self.branch,
+                    "event": "workflow_dispatch",
+                    "repository": {"full_name": queue.REPOSITORY},
+                    "head_repository": {"full_name": queue.REPOSITORY},
+                    "status": "completed",
+                    "conclusion": "success",
+                    "run_attempt": 1,
+                }
+            ]
+            self.jobs[index] = [
+                {
+                    "id": index * 10 + number,
+                    "run_id": index,
+                    "run_attempt": 1,
+                    "name": name,
+                    "head_sha": self.sha,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "html_url": f"https://github.com/{queue.REPOSITORY}/actions/runs/{index}/job/{index * 10 + number}",
+                }
+                for number, name in enumerate(self.checks[workflow])
+            ]
+        self.paths = [
+            {"filename": "pkgs/by-name/ex/example/source.nix", "status": "modified"},
+            {"filename": "docs/catalog.md", "status": "modified"},
+        ]
+        self.parents = [{"sha": self.base}]
+        self.ancestry = "ahead"
+        self.tree = {
+            "truncated": False,
+            "tree": [
+                {
+                    "path": f".github/workflows/{workflow}",
+                    "sha": "c" * 40,
+                    "mode": "100644",
+                    "type": "blob",
+                }
+                for workflow in self.checks
+            ],
+        }
+        self.drift = False
+        self.head = self.sha
+        self.statuses = []
+        self.writes = []
+        self.fail_jobs_api = False
+        self.new_attempt = False
+        self.new_run = False
+        self.history_reads = 0
+        self.workflow_reads = {}
+
+    def _api(self, path: str, method: str = "GET", data: object = None) -> Any:
+        if method != "GET":
+            self.writes.append((path, data))
+            return None
+        if "/git/commits/" in path:
+            return {"parents": self.parents}
+        if f"compare/{self.base}...{self.base}" in path:
+            return {"status": self.ancestry}
+        if "/compare/" in path:
+            return {"status": "ahead", "total_commits": 1, "files": self.paths}
+        if "/git/trees/" in path:
+            if self.drift and self.sha not in path:
+                return {"truncated": False, "tree": []}
+            return self.tree
+        if "/git/ref/heads/" in path:
+            return {"object": {"sha": self.head if self.branch in path else self.base}}
+        if path.endswith(f"/pulls/{self.pr['number']}"):
+            return self.pr
+        if "/status?" in path or path.endswith("/status"):
+            return {"statuses": self.statuses}
+        if "/files?" in path:
+            return self.paths
+        for index, workflow in enumerate(self.checks, 1):
+            if path.endswith(f"/workflows/{workflow}"):
+                return {
+                    "id": index,
+                    "path": f".github/workflows/{workflow}",
+                    "state": "active",
+                }
+            if f"/workflows/{workflow}/runs?" in path:
+                self.history_reads += 1
+                self.workflow_reads[workflow] = self.workflow_reads.get(workflow, 0) + 1
+                if self.new_attempt and self.workflow_reads[workflow] == 2:
+                    self.runs[workflow][0] = {
+                        **self.runs[workflow][0],
+                        "run_attempt": 2,
+                        "status": "in_progress",
+                        "conclusion": None,
+                    }
+                if self.new_run and self.workflow_reads[workflow] == 2:
+                    self.runs[workflow].insert(
+                        0,
+                        {
+                            **self.runs[workflow][0],
+                            "id": 3,
+                            "status": "in_progress",
+                            "conclusion": None,
+                        },
+                    )
+                    self.jobs[3] = []
+                return {
+                    "total_count": len(self.runs[workflow]),
+                    "workflow_runs": self.runs[workflow],
+                }
+        if "/jobs?" in path:
+            if self.fail_jobs_api:
+                raise subprocess.CalledProcessError(1, ["gh", "api"])
+            run_id = int(path.split("/runs/")[1].split("/")[0])
+            return {"total_count": len(self.jobs[run_id]), "jobs": self.jobs[run_id]}
+        if "/actions/runs/" in path:
+            run_id = int(path.rsplit("/", 1)[1])
+            for runs in self.runs.values():
+                for run in runs:
+                    if run["id"] == run_id:
+                        return {**run, "run_attempt": 2} if self.new_attempt else run
+        raise AssertionError(path)
+
+    def _report(self) -> bool:
+        with (
+            patch.object(queue, "api", side_effect=self._api),
+            patch.object(queue, "SOURCE_CACHE", {}),
+            patch.object(queue, "SOURCE_EVIDENCE", {}),
+            patch.object(queue, "SOURCE_CHECKS", self.checks),
+            patch.object(queue, "WORKFLOWS", list(self.checks)),
+        ):
+            return queue.reconcile_source(self.pr)
+
+    def test_real_required_jobs_become_linked_results(self) -> None:
+        self.assertTrue(self._report())
+        self.assertEqual(
+            [data["context"] for _, data in self.writes],
+            ["Build", "Lint", "DCO sign-off"],
+        )
+        self.assertTrue(all(data["state"] == "success" for _, data in self.writes))
+        self.assertEqual(self.writes[-1][1]["target_url"], self.jobs[2][0]["html_url"])
+
+    def test_actions_source_admission_requires_explicit_opt_in(self) -> None:
+        result = subprocess.CompletedProcess([], 0, '[{"bucket":"pass"}]')
+        with (
+            patch.object(queue, "api", side_effect=self._api),
+            patch.object(queue, "SOURCE_CACHE", {}),
+            patch.object(queue, "SOURCE_EVIDENCE", {}),
+            patch.object(queue, "SOURCE_CHECKS", self.checks),
+            patch.object(queue, "WORKFLOWS", list(self.checks)),
+            patch.object(
+                queue, "graphql", return_value={"node": {"mergeQueueEntry": None}}
+            ) as graphql,
+            patch.object(queue.subprocess, "run", return_value=result),
+        ):
+            self.assertTrue(queue.admit(self.pr))
+            self.assertEqual(graphql.call_count, 2)
+            self.assertEqual(self.writes[-1][1]["context"], queue.ADMISSION)
+        self.writes.clear()
+        with (
+            patch.object(queue, "SOURCE_CHECKS", {}),
+            patch.object(queue, "api") as api,
+        ):
+            self.assertFalse(queue.admit(self.pr))
+            api.assert_not_called()
+
+    def test_wrong_author_fork_draft_and_namespace_are_ineligible(self) -> None:
+        for key, value in (("id", 9), ("type", "User"), ("login", "someone")):
+            with self.subTest(key=key):
+                old = self.pr["user"][key]
+                self.pr["user"][key] = value
+                self.assertFalse(queue.source_identity(self.pr))
+                self.pr["user"][key] = old
+        self.pr["head"]["repo"]["full_name"] = "attacker/example"
+        self.assertFalse(queue.source_identity(self.pr))
+        self.pr["head"]["repo"]["full_name"] = queue.REPOSITORY
+        self.pr["draft"] = True
+        self.assertFalse(queue.source_identity(self.pr))
+        self.pr["draft"] = False
+        self.pr["head"]["ref"] = "automation/package-updates/example"
+        self.assertFalse(queue.source_identity(self.pr))
+
+    def test_wrong_parent_ancestry_scope_and_workflow_are_rejected(self) -> None:
+        for invalid in (
+            "parent",
+            "ancestry",
+            "scope",
+            "rename",
+            "workflow",
+            "truncated",
+        ):
+            with self.subTest(invalid=invalid):
+                self.setUp()
+                if invalid == "parent":
+                    self.parents.append({"sha": "d" * 40})
+                if invalid == "ancestry":
+                    self.ancestry = "diverged"
+                if invalid == "scope":
+                    self.paths.append({"filename": ".github/workflows/dco.yml"})
+                if invalid == "rename":
+                    self.paths[0]["status"] = "renamed"
+                if invalid == "workflow":
+                    self.drift = True
+                if invalid == "truncated":
+                    self.tree["truncated"] = True
+                self.assertFalse(self._report())
+                self.assertEqual(self.writes, [])
+
+    def test_real_failed_pending_skipped_missing_and_wrong_head_jobs_never_pass(
+        self,
+    ) -> None:
+        for invalid in (
+            "failure",
+            "pending",
+            "skipped",
+            "missing",
+            "head",
+            "url",
+            "attempt",
+        ):
+            with self.subTest(invalid=invalid):
+                self.setUp()
+                if invalid == "failure":
+                    self.runs["dco.yml"][0]["conclusion"] = "failure"
+                if invalid == "pending":
+                    self.runs["dco.yml"][0]["status"] = "in_progress"
+                if invalid == "skipped":
+                    self.jobs[2][0]["conclusion"] = "skipped"
+                if invalid == "missing":
+                    self.jobs[2] = []
+                if invalid == "head":
+                    self.jobs[2][0]["head_sha"] = "other"
+                if invalid == "url":
+                    self.jobs[2][0]["html_url"] = "https://attacker.example/job"
+                if invalid == "attempt":
+                    self.new_attempt = True
+                if invalid == "new_run":
+                    self.new_run = True
+                if invalid == "job_attempt":
+                    self.jobs[2][0]["run_attempt"] = 2
+                if invalid == "job_run":
+                    self.jobs[2][0]["run_id"] = 9
+                self.assertFalse(self._report())
+                self.assertEqual(self.writes, [])
+
+    def test_zero_job_approval_run_does_not_suppress_real_dispatch(self) -> None:
+        self.runs["dco.yml"].insert(
+            0,
+            {
+                **self.runs["dco.yml"][0],
+                "id": 3,
+                "event": "pull_request",
+                "conclusion": "action_required",
+            },
+        )
+        self.jobs[3] = []
+        self.assertTrue(self._report())
+        self.jobs[3] = [{**self.jobs[2][0], "conclusion": "failure"}]
+        self.writes.clear()
+        self.assertFalse(self._report())
+        self.assertEqual(self.writes, [])
+
+    def test_api_error_does_not_write_or_enqueue(self) -> None:
+        self.fail_jobs_api = True
+        with self.assertRaises(subprocess.CalledProcessError):
+            self._report()
+        self.assertEqual(self.writes, [])
+
+    def test_failed_new_attempt_invalidates_previous_source_success(self) -> None:
+        self.statuses = [
+            {
+                "context": "DCO sign-off",
+                "state": "success",
+                "target_url": self.jobs[2][0]["html_url"],
+                "description": f"{queue.SOURCE_REPORT} result",
+            }
+        ]
+        self.runs["dco.yml"][0]["conclusion"] = "failure"
+        self.assertFalse(self._report())
+        self.assertEqual([data["state"] for _, data in self.writes], ["pending"])
+
+    def _attest(self) -> None:
+        self.statuses = [
+            {
+                "context": job["name"],
+                "state": "success",
+                "target_url": job["html_url"],
+                "description": f"{queue.SOURCE_REPORT} result; attempt 1",
+                "creator": {"id": 41898282},
+            }
+            for jobs in self.jobs.values()
+            for job in jobs
+        ]
+
+    def test_real_failed_new_job_replaces_old_success_with_actual_failure_url(
+        self,
+    ) -> None:
+        self._attest()
+        self.runs["dco.yml"][0].update(run_attempt=2, conclusion="failure")
+        self.jobs[2][0].update(
+            id=25,
+            run_attempt=2,
+            conclusion="failure",
+            html_url=f"https://github.com/{queue.REPOSITORY}/actions/runs/2/job/25",
+        )
+        self.assertFalse(self._report())
+        actual = {data["context"]: data for _, data in self.writes}
+        self.assertEqual(actual["DCO sign-off"]["state"], "failure")
+        self.assertEqual(
+            actual["DCO sign-off"]["target_url"], self.jobs[2][0]["html_url"]
+        )
+        self.assertEqual(actual["Build"]["state"], "pending")
+
+    def test_producer_rerun_after_collection_invalidates_greens_and_refuses_admission(
+        self,
+    ) -> None:
+        self._attest()
+        self.new_attempt = True
+        with (
+            patch.object(queue, "api", side_effect=self._api),
+            patch.object(queue, "SOURCE_CACHE", {}),
+            patch.object(queue, "SOURCE_EVIDENCE", {}),
+            patch.object(queue, "SOURCE_CHECKS", self.checks),
+            patch.object(queue, "WORKFLOWS", list(self.checks)),
+            patch.object(queue, "graphql") as graphql,
+            patch.object(queue.subprocess, "run") as command,
+        ):
+            self.assertFalse(queue.admit(self.pr))
+        self.assertEqual([data["state"] for _, data in self.writes], ["pending"] * 3)
+        graphql.assert_not_called()
+        command.assert_not_called()
+
+    def test_rerun_during_status_publication_is_bounded_and_invalidates_new_greens(
+        self,
+    ) -> None:
+        def api(path: str, method: str = "GET", data: object = None) -> Any:
+            result = self._api(path, method, data)
+            if method == "POST":
+                self.statuses.append({**data, "creator": {"id": 41898282}})
+                if len(self.writes) == 1:
+                    self.runs["ci.yml"][0].update(
+                        run_attempt=2, status="in_progress", conclusion=None
+                    )
+            return result
+
+        with (
+            patch.object(queue, "api", side_effect=api),
+            patch.object(queue, "SOURCE_CACHE", {}),
+            patch.object(queue, "SOURCE_EVIDENCE", {}),
+            patch.object(queue, "SOURCE_CHECKS", self.checks),
+            patch.object(queue, "WORKFLOWS", list(self.checks)),
+        ):
+            self.assertFalse(queue.reconcile_source(self.pr))
+        self.assertEqual(
+            [data["state"] for _, data in self.writes],
+            ["success"] * 3 + ["pending"] * 3,
+        )
+
+    def test_untrusted_cached_status_cannot_replace_actual_job_evidence(self) -> None:
+        self._attest()
+        self.statuses[-1]["creator"]["id"] = 9
+        self.fail_jobs_api = True
+        with self.assertRaises(subprocess.CalledProcessError):
+            self._report()
+        self.assertEqual(self.writes, [])
+
+    def test_changed_ref_and_missing_dco_configuration_do_not_report(self) -> None:
+        self.head = "d" * 40
+        self.assertFalse(self._report())
+        self.assertEqual(self.writes, [])
+        self.setUp()
+        self.checks["dco.yml"] = ["other"]
+        self.assertFalse(self._report())
+        self.assertEqual(self.writes, [])
+
+
+class SourceBudgetTests(unittest.TestCase):
+    """Count API requests for six callers with the actual sixteen-job contract."""
+
+    def _fixtures(self) -> list[PackageSourceTests]:
+        checks = {
+            "ci.yml": [
+                "Build (x86_64-linux)",
+                "Build (aarch64-linux)",
+                "Build (aarch64-darwin)",
+                "Lint and security",
+                "Flake checks (x86_64-linux)",
+                "Flake checks (aarch64-linux)",
+                "Flake checks (aarch64-darwin)",
+                "NUR compatibility / NUR (locked)",
+                "NUR compatibility / NUR (unstable)",
+                "Flake lock health",
+                "Build (x86_64-linux 2/2)",
+                "Build (aarch64-linux 2/2)",
+            ],
+            "codeql.yml": ["Analyze (python) / analyze"],
+            "dependency-review.yml": ["dependency-review / review"],
+            "dco.yml": ["DCO sign-off"],
+            "fuzz.yml": ["Fuzz font path validation"],
+        }
+        fixtures = []
+        for number in range(7, 13):
+            fixture = PackageSourceTests()
+            fixture.setUp()
+            fixture.checks = checks
+            fixture.sha = f"{number:040x}"
+            fixture.head = fixture.sha
+            fixture.branch = f"automation/package-updates-example{number}"
+            fixture.pr["number"] = number
+            fixture.pr["head"].update(sha=fixture.sha, ref=fixture.branch)
+            fixture.paths[0]["filename"] = f"pkgs/by-name/ex/example{number}/source.nix"
+            fixture.tree["tree"] = [
+                {
+                    "path": f".github/workflows/{workflow}",
+                    "sha": "c" * 40,
+                    "mode": "100644",
+                    "type": "blob",
+                }
+                for workflow in checks
+            ]
+            fixture.runs, fixture.jobs = {}, {}
+            for workflow_id, workflow in enumerate(checks, 1):
+                run_id = number * 10 + workflow_id
+                fixture.runs[workflow] = [
+                    {
+                        "id": run_id,
+                        "workflow_id": workflow_id,
+                        "path": f".github/workflows/{workflow}",
+                        "head_sha": fixture.sha,
+                        "head_branch": fixture.branch,
+                        "event": "workflow_dispatch",
+                        "repository": {"full_name": queue.REPOSITORY},
+                        "head_repository": {"full_name": queue.REPOSITORY},
+                        "status": "completed",
+                        "conclusion": "success",
+                        "run_attempt": 1,
+                    }
+                ]
+                fixture.jobs[run_id] = [
+                    {
+                        "id": run_id * 100 + index,
+                        "run_id": run_id,
+                        "run_attempt": 1,
+                        "name": name,
+                        "head_sha": fixture.sha,
+                        "status": "completed",
+                        "conclusion": "success",
+                        "html_url": f"https://github.com/{queue.REPOSITORY}/actions/runs/{run_id}/job/{run_id * 100 + index}",
+                    }
+                    for index, name in enumerate(checks[workflow])
+                ]
+            fixture._attest()
+            fixtures.append(fixture)
+        return fixtures
+
+    def _case(self, mode: str) -> dict[str, int]:
+        fixtures = self._fixtures()
+        counts = {"get": 0, "write": 0, "jobs": 0}
+        if mode in {"queued", "admitted_event"}:
+            for fixture in fixtures:
+                fixture.statuses.append(
+                    {"context": queue.ADMISSION, "state": "success"}
+                )
+        if mode == "initial_event":
+            fixtures[0].statuses = []
+
+        def api(path: str, method: str = "GET", data: object = None) -> Any:
+            counts["get" if method == "GET" else "write"] += 1
+            if "/jobs?" in path:
+                counts["jobs"] += 1
+            for fixture in fixtures:
+                if (
+                    fixture.sha in path
+                    or fixture.branch in path
+                    or path.endswith(f"/pulls/{fixture.pr['number']}")
+                    or f"/pulls/{fixture.pr['number']}/files?" in path
+                ):
+                    return fixture._api(path, method, data)
+                for run_id in fixture.jobs:
+                    if f"/runs/{run_id}/" in path or path.endswith(f"/runs/{run_id}"):
+                        return fixture._api(path, method, data)
+            return fixtures[0]._api(path, method, data)
+
+        def graphql(query: str, **variables: str) -> dict[str, Any]:
+            counts["get"] += 1
+            return {"node": {"mergeQueueEntry": {"id": "queue"}}}
+
+        head = fixtures[0].sha if mode.endswith("event") else ""
+        activity = (
+            "in_progress"
+            if mode in {"admitted_event", "initial_event"}
+            else "completed"
+        )
+        with (
+            patch.object(queue, "api", side_effect=api),
+            patch.object(queue, "graphql", side_effect=graphql),
+            patch.object(queue, "SOURCE_CACHE", {}),
+            patch.object(queue, "SOURCE_EVIDENCE", {}),
+            patch.object(queue, "SOURCE_CHECKS", fixtures[0].checks),
+            patch.object(queue, "WORKFLOWS", list(fixtures[0].checks)),
+            patch.object(queue, "SOURCE_HEAD", head),
+            patch.object(queue, "SOURCE_ACTIVITY", activity),
+        ):
+            for fixture in fixtures:
+                if mode == "idle":
+                    self.assertTrue(queue.reconcile_source(fixture.pr))
+                else:
+                    queue.admit(fixture.pr)
+        return counts
+
+    def test_six_idle_source_prs_fit_hourly_recovery_budget(self) -> None:
+        counts = self._case("idle")
+        self.assertLessEqual(counts["get"], 110)
+        self.assertEqual(counts["write"], 0)
+        self.assertEqual(counts["jobs"], 0)
+
+    def test_six_admitted_sources_skip_unrelated_polling(self) -> None:
+        self.assertEqual(self._case("queued"), {"get": 12, "write": 0, "jobs": 0})
+
+    def test_source_event_inspects_only_its_exact_head(self) -> None:
+        counts = self._case("completed_event")
+        self.assertLessEqual(counts["get"], 25)
+        self.assertEqual(counts["write"], 0)
+        self.assertEqual(counts["jobs"], 0)
+
+    def test_rerun_event_invalidates_even_an_admitted_source(self) -> None:
+        counts = self._case("admitted_event")
+        self.assertEqual(counts, {"get": 33, "write": 16, "jobs": 0})
+
+    def test_initial_requested_event_with_no_attestation_stops_immediately(
+        self,
+    ) -> None:
+        self.assertEqual(self._case("initial_event"), {"get": 1, "write": 0, "jobs": 0})
+
+
 if __name__ == "__main__":
     unittest.main()
