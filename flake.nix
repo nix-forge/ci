@@ -74,6 +74,7 @@
             pkgs.shellcheck
             pkgs.gitleaks
             pkgs.git
+            pkgs.jq
             python
             validator
           ];

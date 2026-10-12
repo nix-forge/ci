@@ -62,6 +62,18 @@ jobs:
 
 
 class ContractTests(unittest.TestCase):
+    def test_release_rejects_a_stale_signer_digest(self):
+        stale = RELEASE_WORKFLOW.replace(
+            "permissions: {}",
+            "env:\n  SLSA_BUILDER_SHA: " + "b" * 40 + "\npermissions: {}",
+        )
+        errors = self.check(WORKFLOW, {".github/workflows/release.yml": stale})
+        self.assertTrue(any("signer digest must match" in error for error in errors))
+        current = stale.replace("b" * 40, PIN)
+        self.assertEqual(
+            self.check(WORKFLOW, {".github/workflows/release.yml": current}), []
+        )
+
     def test_action_metadata_extensions(self):
         action = (
             "runs:\n  using: composite\n  steps:\n    - uses: example/action@main\n"
