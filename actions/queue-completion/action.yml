@@ -1,5 +1,9 @@
 name: Notify queue completion
 description: Notify the trusted default-branch reconciler after manually dispatched validation.
+inputs:
+  source-activity:
+    description: Optional package-source notification phase, in_progress or completed. Requires matching reconciler dispatch inputs.
+    default: ''
 runs:
   using: composite
   steps:
@@ -9,9 +13,17 @@ runs:
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
         DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        SOURCE_ACTIVITY: ${{ inputs.source-activity }}
       run: |
+        args=(-f source_run_id="$GITHUB_RUN_ID")
+        case "$SOURCE_ACTIVITY" in
+          '') ;;
+          in_progress|completed)
+            args+=(-f source_run_attempt="$GITHUB_RUN_ATTEMPT" -f source_activity="$SOURCE_ACTIVITY") ;;
+          *) echo '::error::Invalid package-source notification phase'; exit 1 ;;
+        esac
         for attempt in 1 2 3; do
-          if gh workflow run reconcile-merge-queue.yml --ref "$DEFAULT_BRANCH" -f source_run_id="$GITHUB_RUN_ID"; then
+          if gh workflow run reconcile-merge-queue.yml --ref "$DEFAULT_BRANCH" "${args[@]}"; then
             exit 0
           fi
           echo "::warning::Queue completion notification attempt $attempt failed"

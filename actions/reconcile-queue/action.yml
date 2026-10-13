@@ -16,6 +16,12 @@ inputs:
   source-run-id:
     description: Optional dispatch completion notification.
     default: ''
+  source-run-attempt:
+    description: Producer run attempt for a package-source start or completion callback.
+    default: ''
+  source-activity:
+    description: Package-source callback phase, in_progress or completed.
+    default: ''
 runs:
   using: composite
   steps:
@@ -27,6 +33,8 @@ runs:
         BASE_SHA_WORKFLOWS: ${{ inputs.base-sha-workflows }}
         QUEUE_WORKFLOWS: ${{ inputs.workflows }}
         SOURCE_RUN_ID: ${{ inputs.source-run-id }}
+        SOURCE_RUN_ATTEMPT: ${{ inputs.source-run-attempt }}
+        SOURCE_NOTIFICATION_ACTIVITY: ${{ inputs.source-activity }}
         SOURCE_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         SOURCE_ACTIVITY: ${{ github.event.action }}
       run: |
@@ -90,6 +98,8 @@ runs:
         BASE_SHA_WORKFLOWS: ${{ inputs.base-sha-workflows }}
         QUEUE_WORKFLOWS: ${{ inputs.workflows }}
         SOURCE_RUN_ID: ${{ inputs.source-run-id }}
+        SOURCE_RUN_ATTEMPT: ${{ inputs.source-run-attempt }}
+        SOURCE_NOTIFICATION_ACTIVITY: ${{ inputs.source-activity }}
         SOURCE_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         SOURCE_ACTIVITY: ${{ github.event.action }}
       run: python3 "$ACTION_PATH/../../scripts/reconcile-queue.py"

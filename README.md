@@ -105,6 +105,29 @@ mirrors skipped validation as success. `actions/queue-completion` notifies this
 trusted reconciler from dispatched queue runs. Retain the caller's existing
 `Queue completion callback` name and event guard.
 
+Package-source callers can also notify the reconciler when validation starts and
+finishes. Add optional `source_run_attempt` and `source_activity` dispatch inputs
+to the default-branch reconciler, forwarding them to `source-run-attempt` and
+`source-activity` on `actions/reconcile-queue`. Source callback jobs use
+`actions/queue-completion` with `source-activity: in_progress` at start and
+`source-activity: completed` after all validation jobs. Restrict these jobs to
+same-repository dispatched `automation/package-updates-` branches and retain
+only their existing `actions: write` permission. Queue callbacks can omit the
+new input and keep their original payload.
+
+The reconciler validates the producer run's repository, workflow identity,
+path, branch, head and attempt before using its metadata. Start notifications
+invalidate previous mirrored jobs and admission without waiting for builds;
+completion notifications wait briefly for their own producer to finish and
+revalidate its actual attempt. A delayed start for a completed attempt reads
+the completed results. An already queued source PR cannot bypass this check.
+Statuses never replace the required native jobs or relax branch protection.
+After publishing new complete queue success, reconciliation waits at most 55
+seconds for GitHub's asynchronous merge to expose a different live front ref.
+It verifies that ref and dispatches its missing validation through the existing
+handler once. Running or failed candidates do not start this additional poll;
+there is no recursive recovery dispatch.
+
 The actions read the default branch from GitHub's repository event metadata.
 Use that same default branch in the caller's callback guard. A package updater
 can opt in to admission with `automation-branch`; it accepts only that exact
@@ -128,8 +151,8 @@ workflow and required job passes on the exact source SHA. A blocked approval run
 can be ignored only when its jobs endpoint proves zero jobs. Failed, pending,
 skipped, missing, stale and untrusted evidence never becomes success; newer
 attempts invalidate older source adapter results. Actual failed required jobs
-receive failure statuses linking the current failed job. Normal required checks and
-expected-head merge-queue admission still apply. Unchanged completed runs reuse
+receive failure statuses linking the current failed job. Normal required checks
+and expected-head merge-queue admission still apply. Unchanged completed runs reuse
 only this bot's previously verified job attestations for the same run and attempt;
 latest-run metadata remains live. Immutable Git objects and workflow identity are
 cached only within one reconciliation. Opted-in callers should also reconcile
@@ -173,8 +196,9 @@ release. Do not provide privileged tokens to PR build steps.
 `actions/discover-lockfiles` emits a JSON `lockfiles` output for a workflow matrix.
 It requires a tracked `flake.lock` for each tracked `flake.nix` in the caller
 repository. Deleting only the lockfile fails discovery; deleting the entire
-partition removes its matrix entry. Added, renamed and deleted partitions change that inventory
-without edits to the workflow. Submodules own their lockfile health jobs.
+partition removes its matrix entry. Added, renamed and deleted partitions change
+that inventory without edits to the workflow. Submodules own their lockfile
+health jobs.
 Require a stable aggregate job that waits for the complete matrix and fails for
 any failed, cancelled or skipped matrix. Protect that aggregate instead of
 individual lockfile names, so adding coverage cannot be bypassed and deleting a
