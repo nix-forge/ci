@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import copy
 import importlib.util
 import io
 import os
@@ -23,6 +24,14 @@ if spec is None or spec.loader is None:
     raise ImportError(message)
 queue = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(queue)
+
+
+def snapshot_fixture(fixture: Any) -> list[dict[str, Any]]:
+    """Expose the same immutable-head statuses as the GraphQL projection."""
+    queue.SOURCE_VIEW[fixture.sha] = {
+        status["context"]: status for status in fixture.statuses
+    }
+    return [fixture.pr]
 
 
 class ReconcileTests(unittest.TestCase):
@@ -1008,6 +1017,19 @@ class PackageSourceTests(unittest.TestCase):
         if method != "GET":
             self.writes.append((path, data))
             return None
+        if "/actions/workflows?" in path:
+            workflows = [
+                {
+                    "id": index,
+                    "path": f".github/workflows/{workflow}",
+                    "state": "active",
+                }
+                for index, workflow in enumerate(self.checks, 1)
+            ]
+            return {"total_count": len(workflows), "workflows": workflows}
+        if "/actions/runs?head_sha=" in path:
+            runs = [run for group in self.runs.values() for run in group]
+            return {"total_count": len(runs), "workflow_runs": runs}
         if "/git/commits/" in path:
             return {"parents": self.parents}
         if f"compare/{self.base}...{self.base}" in path:
@@ -1239,7 +1261,11 @@ class PackageSourceTests(unittest.TestCase):
                 "state": "success",
                 "target_url": job["html_url"],
                 "description": f"{queue.SOURCE_REPORT} result; attempt 1",
-                "creator": {"id": 41898282},
+                "creator": {
+                    "id": 41898282,
+                    "type": "Bot",
+                    "login": "github-actions[bot]",
+                },
             }
             for jobs in self.jobs.values()
             for job in jobs
@@ -1289,7 +1315,16 @@ class PackageSourceTests(unittest.TestCase):
         def api(path: str, method: str = "GET", data: object = None) -> Any:
             result = self._api(path, method, data)
             if method == "POST":
-                self.statuses.append({**data, "creator": {"id": 41898282}})
+                self.statuses.append(
+                    {
+                        **data,
+                        "creator": {
+                            "id": 41898282,
+                            "type": "Bot",
+                            "login": "github-actions[bot]",
+                        },
+                    }
+                )
                 if len(self.writes) == 1:
                     self.runs["ci.yml"][0].update(
                         run_attempt=2, status="in_progress", conclusion=None
@@ -1308,6 +1343,61 @@ class PackageSourceTests(unittest.TestCase):
             [data["state"] for _, data in self.writes],
             ["success"] * 3 + ["pending"] * 3,
         )
+
+    def test_noncanonical_creator_is_replaced_once_after_actual_jobs_prove_success(
+        self,
+    ) -> None:
+        for creator in (
+            {"id": 9, "type": "User", "login": "developer"},
+            {"id": 9, "type": "Bot", "login": "other[bot]"},
+            {"id": 41898282, "type": "User", "login": "github-actions[bot]"},
+            {"id": 41898282, "type": "Bot", "login": "other[bot]"},
+        ):
+            self.setUp()
+            self._attest()
+            self.statuses[0]["creator"] = creator
+            calls = []
+
+            def api(
+                path: str,
+                method: str = "GET",
+                data: object = None,
+                *,
+                records: list[tuple[str, str]] = calls,
+            ) -> Any:
+                records.append((method, path))
+                result = self._api(path, method, data)
+                if method == "POST":
+                    previous = next(
+                        value
+                        for value in self.statuses
+                        if value["context"] == data["context"]
+                    )
+                    previous.update(data)
+                    previous["creator"] = {
+                        "id": 41898282,
+                        "type": "Bot",
+                        "login": "github-actions[bot]",
+                    }
+                return result
+
+            with (
+                self.subTest(creator=creator),
+                patch.object(queue, "api", side_effect=api),
+                patch.object(queue, "SOURCE_CACHE", {}),
+                patch.object(queue, "SOURCE_EVIDENCE", {}),
+                patch.object(queue, "SOURCE_CHECKS", self.checks),
+                patch.object(queue, "WORKFLOWS", list(self.checks)),
+                patch.object(queue, "SOURCE_CALLBACK", False),
+            ):
+                self.assertTrue(queue.reconcile_source(self.pr))
+                self.assertEqual(len(self.writes), 1)
+                self.assertTrue(any("/jobs?" in path for _method, path in calls))
+                self.writes.clear()
+                calls.clear()
+                self.assertTrue(queue.reconcile_source(self.pr))
+                self.assertEqual(self.writes, [])
+                self.assertFalse(any("/jobs?" in path for _method, path in calls))
 
     def test_untrusted_cached_status_cannot_replace_actual_job_evidence(self) -> None:
         self._attest()
@@ -1478,7 +1568,7 @@ class SourceBudgetTests(unittest.TestCase):
 
     def test_rerun_event_invalidates_even_an_admitted_source(self) -> None:
         counts = self._case("admitted_event")
-        self.assertEqual(counts, {"get": 35, "write": 17, "jobs": 0})
+        self.assertEqual(counts, {"get": 5, "write": 17, "jobs": 0})
 
     def test_initial_requested_event_with_no_attestation_stops_immediately(
         self,
@@ -1529,7 +1619,35 @@ class SourceNotificationTests(unittest.TestCase):
         self.assertEqual(result, (self.fixture.sha, "completed"))
         wait.assert_not_called()
 
+    def test_already_completed_producer_reuses_actual_metadata_without_wait(
+        self,
+    ) -> None:
+        reads = []
+
+        def api(path: str, method: str = "GET", data: object = None) -> Any:
+            reads.append(path)
+            return self.fixture._api(path, method, data)
+
+        with (
+            patch.object(queue, "api", side_effect=api),
+            patch.object(queue, "wait_for_source_run") as wait,
+            patch.object(queue, "SOURCE_CHECKS", self.fixture.checks),
+            patch.object(queue, "WORKFLOWS", list(self.fixture.checks)),
+            patch.object(queue, "SOURCE_CACHE", {}),
+            patch.object(queue, "SOURCE_CALLBACK", False),
+        ):
+            self.assertEqual(
+                queue.source_notification(self.run_id, "1", "completed"),
+                (self.fixture.sha, "completed"),
+            )
+        wait.assert_not_called()
+        self.assertEqual(
+            sum(path.endswith("/actions/runs/" + self.run_id) for path in reads), 1
+        )
+
     def test_new_attempt_during_completion_cannot_reuse_old_identity(self) -> None:
+        self.run.update(status="in_progress", conclusion=None)
+
         def rerun(_run_id: str) -> None:
             self.run.update(status="in_progress", conclusion=None, run_attempt=2)
 
@@ -1579,6 +1697,8 @@ class SourceNotificationTests(unittest.TestCase):
             self.notification("in_progress", "2")
 
     def test_head_mutation_during_wait_is_a_real_error(self) -> None:
+        self.run.update(status="in_progress", conclusion=None)
+
         def mutate(_run_id: str) -> None:
             self.run["head_sha"] = "e" * 40
 
@@ -1636,6 +1756,11 @@ class SourceNotificationTests(unittest.TestCase):
                     patch.object(queue, "SOURCE_EVIDENCE", {}),
                     patch.object(queue, "admit") as admit,
                     patch.object(queue, "dispatch_entry") as dispatch,
+                    patch.object(
+                        queue,
+                        "source_ref",
+                        return_value=None if reason == "deleted" else self.fixture.head,
+                    ),
                     patch.object(queue, "graphql") as graphql,
                     contextlib.redirect_stdout(output),
                 ):
@@ -1759,6 +1884,12 @@ class SourceNotificationTests(unittest.TestCase):
             patch.object(queue, "SOURCE_HEAD", ""),
             patch.object(queue, "SOURCE_ACTIVITY", ""),
             patch.object(queue, "wait_for_source_run") as wait,
+            patch.object(queue, "source_ref", return_value=self.fixture.sha),
+            patch.object(
+                queue,
+                "source_snapshot",
+                side_effect=lambda *args: snapshot_fixture(self.fixture),
+            ),
             patch.object(queue, "graphql") as graphql,
         ):
             queue.main()
@@ -1879,6 +2010,9 @@ class QueueAdvanceTests(unittest.TestCase):
         fixture.statuses = []
         old = {"ref": queue.QUEUE_PREFIX + "old", "object": {"sha": fixture.sha}}
         new = {"ref": queue.QUEUE_PREFIX + "next", "object": {"sha": "d" * 40}}
+        for runs in fixture.runs.values():
+            for run in runs:
+                run["head_branch"] = old["ref"].removeprefix("refs/heads/")
         statuses = []
         dispatches = []
         ticks = 0
@@ -1902,7 +2036,7 @@ class QueueAdvanceTests(unittest.TestCase):
                 }
             if "/git/commits/" in path:
                 return {"parents": [{"sha": fixture.base}]}
-            if "/actions/workflows/" in path and "head_sha=" + "d" * 40 in path:
+            if "/actions/" in path and "head_sha=" + "d" * 40 in path:
                 return {"total_count": 0, "workflow_runs": []}
             return fixture._api(path, method, data)
 
@@ -1934,3 +2068,735 @@ class QueueAdvanceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceSnapshotTests(unittest.TestCase):
+    """Check live-ref projection and batch leases independently of native jobs."""
+
+    def node(self) -> dict[str, Any]:
+        return {
+            "number": 7,
+            "id": "PR7",
+            "isDraft": False,
+            "baseRefName": "main",
+            "headRefName": "automation/package-updates-example",
+            "headRefOid": "a" * 40,
+            "author": {
+                "__typename": "Bot",
+                "databaseId": 41898282,
+                "login": "github-actions",
+            },
+            "headRepository": {"nameWithOwner": queue.REPOSITORY},
+            "headRef": {
+                "name": "automation/package-updates-example",
+                "repository": {"nameWithOwner": queue.REPOSITORY},
+                "target": {"oid": "a" * 40, "status": {"contexts": []}},
+            },
+        }
+
+    def snapshot(
+        self,
+        node: dict[str, Any],
+        truncated: bool = False,
+        *,
+        sources_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        response = {
+            "repository": {
+                "pullRequests": {
+                    "pageInfo": {"hasNextPage": truncated},
+                    "nodes": [node],
+                }
+            }
+        }
+        with (
+            patch.object(queue, "graphql", return_value=response),
+            patch.object(queue, "SOURCE_VIEW", {}),
+        ):
+            return queue.source_snapshot(sources_only=sources_only)
+
+    def test_generic_snapshot_preserves_rest_bot_human_fork_and_draft_fields(
+        self,
+    ) -> None:
+        for kind in ("dependabot", "actions", "human", "fork", "draft"):
+            node = self.node()
+            if kind in {"dependabot", "draft"}:
+                node["author"].update(databaseId=49699333, login="dependabot")
+                node["headRefName"] = "dependabot/example"
+                node["isDraft"] = kind == "draft"
+                expected_login = "dependabot[bot]"
+            elif kind == "actions":
+                node["headRefName"] = "automation/update"
+                expected_login = "github-actions[bot]"
+            else:
+                node["author"] = {
+                    "__typename": "User",
+                    "databaseId": 1,
+                    "login": "developer",
+                }
+                node["headRefName"] = "feature/change"
+                expected_login = "developer"
+                if kind == "fork":
+                    node["headRepository"]["nameWithOwner"] = "developer/fork"
+                    node["headRef"]["repository"]["nameWithOwner"] = "developer/fork"
+            node["headRef"]["name"] = node["headRefName"]
+            with self.subTest(kind=kind):
+                pr = self.snapshot(node, sources_only=False)[0]
+                self.assertEqual(pr["user"]["login"], expected_login)
+                self.assertEqual(pr["user"]["id"], node["author"]["databaseId"])
+                self.assertEqual(pr["draft"], node["isDraft"])
+                self.assertEqual(
+                    pr["head"]["repo"]["full_name"],
+                    node["headRepository"]["nameWithOwner"],
+                )
+                self.assertEqual(pr["head"]["sha"], node["headRefOid"])
+                self.assertEqual(pr["head"]["ref"], node["headRefName"])
+                self.assertEqual(pr["base"]["ref"], node["baseRefName"])
+
+    def test_generic_dependabot_snapshot_still_admits_with_real_required_policy(
+        self,
+    ) -> None:
+        node = self.node()
+        node["author"].update(databaseId=49699333, login="dependabot")
+        node["headRefName"] = "dependabot/example"
+        node["headRef"]["name"] = node["headRefName"]
+        pr = self.snapshot(node, sources_only=False)[0]
+
+        def api(path: str, method: str = "GET", data: object = None) -> Any:
+            if "/files?" in path:
+                return []
+            if path.endswith("/status"):
+                return {"statuses": []}
+            if method == "POST":
+                return None
+            raise AssertionError(path)
+
+        with (
+            patch.object(queue, "SOURCE_CHECKS", {}),
+            patch.object(queue, "api", side_effect=api),
+            patch.object(
+                queue, "graphql", return_value={"node": {"mergeQueueEntry": None}}
+            ) as gql,
+            patch.object(
+                queue.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, '[{"bucket":"pass"}]'),
+            ),
+        ):
+            self.assertTrue(queue.admit(pr))
+        self.assertIn("enqueuePullRequest", gql.call_args.args[0])
+
+    def test_exact_bot_projection_preserves_source_identity(self) -> None:
+        self.assertTrue(queue.source_identity(self.snapshot(self.node())[0]))
+
+    def test_login_alone_does_not_prove_bot_identity(self) -> None:
+        node = self.node()
+        node["author"]["__typename"] = "User"
+        self.assertEqual(self.snapshot(node), [])
+
+    def test_inconsistent_live_head_and_cross_repository_ref_rejected(self) -> None:
+        for mutation in ("oid", "repository", "name"):
+            node = self.node()
+            if mutation == "oid":
+                node["headRef"]["target"]["oid"] = "b" * 40
+            elif mutation == "repository":
+                node["headRef"]["repository"]["nameWithOwner"] = "other/repository"
+            else:
+                node["headRef"]["name"] = "other-branch"
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                self.snapshot(node)
+
+    def test_truncated_pull_inventory_is_not_silently_accepted(self) -> None:
+        with self.assertRaises(ValueError):
+            self.snapshot(self.node(), truncated=True)
+
+    def test_duplicate_status_context_rejected(self) -> None:
+        node = self.node()
+        value = {
+            "context": "DCO sign-off",
+            "state": "SUCCESS",
+            "targetUrl": "url",
+            "description": "real",
+            "creator": node["author"],
+        }
+        node["headRef"]["target"]["status"]["contexts"] = [value, value]
+        with self.assertRaises(ValueError):
+            self.snapshot(node)
+
+    def test_human_fork_does_not_abort_two_owned_source_heads(self) -> None:
+        first = self.node()
+        second = self.node()
+        second["number"] = 8
+        second["id"] = "PR8"
+        second["headRefOid"] = "b" * 40
+        second["headRef"]["target"]["oid"] = "b" * 40
+        fork = self.node()
+        fork["author"] = {"__typename": "User", "login": "contributor"}
+        fork["headRepository"]["nameWithOwner"] = "contributor/fork"
+        fork["headRef"]["repository"]["nameWithOwner"] = "contributor/fork"
+        response = {
+            "repository": {
+                "pullRequests": {
+                    "pageInfo": {"hasNextPage": False},
+                    "nodes": [fork, first, second],
+                }
+            }
+        }
+        with (
+            patch.dict(os.environ, {"SOURCE_RUN_ID": "123"}),
+            patch.object(queue, "SOURCE_CHECKS", {"ci.yml": ["Build"]}),
+            patch.object(
+                queue, "source_notification", return_value=("a" * 40, "completed")
+            ),
+            patch.object(queue, "source_readiness"),
+            patch.object(queue, "graphql", return_value=response),
+            patch.object(queue, "admit", return_value=False) as admit,
+        ):
+            queue.main()
+        self.assertEqual(
+            [call.args[0]["number"] for call in admit.call_args_list], [7, 8]
+        )
+
+    def test_missing_deleted_ref_is_not_an_admission_lease(self) -> None:
+        node = self.node()
+        node["headRef"] = None
+        self.assertEqual(self.snapshot(node), [])
+
+    def test_aggregate_run_inventory_rejects_truncation_and_count_mismatch(
+        self,
+    ) -> None:
+        for response in (
+            {"total_count": 100, "workflow_runs": []},
+            {"total_count": 1, "workflow_runs": []},
+        ):
+            with (
+                patch.object(queue, "api", return_value=response),
+                self.assertRaises(ValueError),
+            ):
+                queue.source_run_inventory({"head": {"sha": "a" * 40}})
+
+    def test_partial_ci_does_not_hide_real_terminal_dco_failure(self) -> None:
+        fixture = PackageSourceTests()
+        fixture.setUp()
+        fixture.runs["ci.yml"][0].update(status="in_progress", conclusion=None)
+        run = fixture.runs["dco.yml"][0]
+        run["conclusion"] = "failure"
+        fixture.jobs[run["id"]][0]["conclusion"] = "failure"
+        with (
+            patch.object(queue, "api", side_effect=fixture._api),
+            patch.object(queue, "SOURCE_CHECKS", fixture.checks),
+            patch.object(queue, "WORKFLOWS", list(fixture.checks)),
+            patch.object(queue, "SOURCE_CALLBACK", False),
+            patch.object(queue, "SOURCE_CACHE", {}),
+            patch.object(queue, "SOURCE_EVIDENCE", {}),
+        ):
+            self.assertIsNone(queue.source_jobs(fixture.pr))
+            self.assertEqual(
+                queue.SOURCE_EVIDENCE[fixture.sha]["failures"][0]["html_url"],
+                fixture.jobs[run["id"]][0]["html_url"],
+            )
+
+
+class SourceReadinessTests(unittest.TestCase):
+    """Keep the cheap readiness path read-only and fail closed on partial evidence."""
+
+    def setUp(self) -> None:
+        self.fixture = PackageSourceTests()
+        self.fixture.setUp()
+        self.fixture._attest()
+        self.fixture.statuses.append({"context": queue.ADMISSION, "state": "success"})
+        self.suites = []
+        for runs in self.fixture.runs.values():
+            run = runs[0]
+            self.suites.append(
+                {
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "repository": {"nameWithOwner": queue.REPOSITORY},
+                    "commit": {"oid": self.fixture.sha},
+                    "branch": {
+                        "name": self.fixture.branch,
+                        "repository": {"nameWithOwner": queue.REPOSITORY},
+                    },
+                    "workflowRun": {
+                        "databaseId": run["id"],
+                        "runAttempt": run["run_attempt"],
+                        "event": run["event"],
+                        "file": {"path": run["path"]},
+                        "workflow": {
+                            "databaseId": run["workflow_id"],
+                            "state": "ACTIVE",
+                        },
+                    },
+                }
+            )
+
+    def response(self, truncated: bool = False) -> dict[str, Any]:
+        return {
+            "repository": {
+                "head0": {
+                    "oid": self.fixture.sha,
+                    "checkSuites": {
+                        "pageInfo": {"hasNextPage": truncated},
+                        "nodes": self.suites,
+                    },
+                }
+            }
+        }
+
+    def test_readiness_rejects_truncated_missing_and_tampered_suite_identity(
+        self,
+    ) -> None:
+        for mode in (
+            "truncated",
+            "missing",
+            "branch",
+            "repository",
+            "workflow",
+            "head",
+            "approval",
+        ):
+            self.setUp()
+            if mode == "missing":
+                self.suites.pop()
+            elif mode == "branch":
+                self.suites[0]["branch"]["name"] = "wrong"
+            elif mode == "repository":
+                self.suites[0]["repository"]["nameWithOwner"] = "other/repo"
+            elif mode == "workflow":
+                self.suites[0]["workflowRun"]["workflow"]["databaseId"] = 99
+            elif mode == "head":
+                self.suites[0]["commit"]["oid"] = "b" * 40
+            elif mode == "approval":
+                self.suites[0]["conclusion"] = "ACTION_REQUIRED"
+            with (
+                self.subTest(mode=mode),
+                patch.object(
+                    queue, "graphql", return_value=self.response(mode == "truncated")
+                ),
+                patch.object(queue, "api", side_effect=self.fixture._api),
+                patch.object(queue, "SOURCE_CHECKS", self.fixture.checks),
+                patch.object(queue, "WORKFLOWS", list(self.fixture.checks)),
+                patch.object(queue, "SOURCE_CACHE", {}),
+                patch.object(queue, "SOURCE_PREFLIGHT", {}),
+            ):
+                queue.source_readiness([self.fixture.pr])
+                self.assertNotIn(self.fixture.sha, queue.SOURCE_PREFLIGHT)
+
+    def report(self, projected: bool = True) -> bool:
+        statuses = {value["context"]: value for value in self.fixture.statuses}
+        with (
+            patch.object(queue, "api", side_effect=self.fixture._api),
+            patch.object(queue, "graphql", return_value=self.response()),
+            patch.object(queue, "source_lease", return_value=True),
+            patch.object(queue, "source_ref", return_value=self.fixture.base),
+            patch.object(queue, "SOURCE_CHECKS", self.fixture.checks),
+            patch.object(queue, "WORKFLOWS", list(self.fixture.checks)),
+            patch.object(queue, "SOURCE_CACHE", {}),
+            patch.object(queue, "SOURCE_PREFLIGHT", {}),
+            patch.object(queue, "SOURCE_EVIDENCE", {}),
+            patch.object(queue, "SOURCE_RUN_LISTS", {}),
+            patch.object(queue, "SOURCE_CALLBACK", True),
+            patch.object(queue, "SOURCE_HEAD", ""),
+        ):
+            if projected:
+                queue.source_readiness([self.fixture.pr])
+            return queue.reconcile_source(self.fixture.pr, statuses)
+
+    def test_failed_current_run_with_old_greens_cannot_take_either_duplicate_shortcut(
+        self,
+    ) -> None:
+        for projected in (False, True):
+            self.setUp()
+            run = self.fixture.runs["dco.yml"][0]
+            run["conclusion"] = "failure"
+            self.suites[-1]["conclusion"] = "FAILURE"
+            self.fixture.jobs[run["id"]][0]["conclusion"] = "failure"
+            with self.subTest(projected=projected):
+                self.assertFalse(self.report(projected))
+                failures = [
+                    data
+                    for _path, data in self.fixture.writes
+                    if data["state"] == "failure"
+                ]
+                self.assertEqual(len(failures), 1)
+                self.assertEqual(
+                    failures[0]["target_url"],
+                    self.fixture.jobs[run["id"]][0]["html_url"],
+                )
+
+    def test_missing_ci_producer_does_not_hide_later_failed_dco(self) -> None:
+        self.fixture.runs["ci.yml"] = []
+        self.suites.pop(0)
+        run = self.fixture.runs["dco.yml"][0]
+        run["conclusion"] = "failure"
+        self.fixture.jobs[run["id"]][0]["conclusion"] = "failure"
+        self.assertFalse(self.report())
+        self.assertEqual(
+            [
+                data["target_url"]
+                for _path, data in self.fixture.writes
+                if data["state"] == "failure"
+            ],
+            [self.fixture.jobs[run["id"]][0]["html_url"]],
+        )
+
+    def test_known_pending_ci_and_failed_dco_preserve_actual_failure_url(self) -> None:
+        run = self.fixture.runs["ci.yml"][0]
+        run.update(status="in_progress", conclusion=None)
+        self.suites[0].update(status="IN_PROGRESS", conclusion=None)
+        run = self.fixture.runs["dco.yml"][0]
+        run["conclusion"] = "failure"
+        self.suites[-1]["conclusion"] = "FAILURE"
+        self.fixture.jobs[run["id"]][0]["conclusion"] = "failure"
+        self.assertFalse(self.report())
+        self.assertEqual(
+            [
+                data["target_url"]
+                for _path, data in self.fixture.writes
+                if data["state"] == "failure"
+            ],
+            [self.fixture.jobs[run["id"]][0]["html_url"]],
+        )
+
+    def test_new_attempt_invalidates_old_managed_greens(self) -> None:
+        self.fixture.runs["ci.yml"][0].update(
+            run_attempt=2, status="in_progress", conclusion=None
+        )
+        self.suites[0].update(status="IN_PROGRESS", conclusion=None)
+        self.suites[0]["workflowRun"]["runAttempt"] = 2
+        self.assertFalse(self.report())
+        self.assertTrue(self.fixture.writes)
+        self.assertEqual(
+            {data["state"] for _path, data in self.fixture.writes}, {"pending"}
+        )
+
+    def test_duplicate_completed_callback_does_not_fetch_jobs_or_publish(self) -> None:
+        self.fixture.fail_jobs_api = True
+        self.assertTrue(self.report())
+        self.assertEqual(self.fixture.writes, [])
+
+
+class SourcePacingTests(unittest.TestCase):
+    """Read operations do not consume the paced source content-write slots."""
+
+    def test_actual_transport_paces_rest_and_enqueue_but_not_graphql_reads(
+        self,
+    ) -> None:
+        now = [0.0]
+        sleeps = []
+
+        def sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        response = subprocess.CompletedProcess([], 0, "{}")
+        with (
+            patch.object(queue, "SOURCE_CALLBACK", True),
+            patch.object(queue, "SOURCE_LAST_WRITE", None),
+            patch.object(queue.time, "monotonic", side_effect=lambda: now[0]),
+            patch.object(queue.time, "sleep", side_effect=sleep),
+            patch.object(queue.subprocess, "run", return_value=response),
+        ):
+            queue.api("repos/example/statuses/sha", "POST", {})
+            queue.api("graphql", "POST", {"query": "query {viewer {login}}"})
+            queue.api("graphql", "POST", {"query": "mutation { enqueuePullRequest }"})
+            queue.api("repos/example/dispatches", "POST", {})
+        self.assertEqual(sleeps, [4.0, 4.0])
+
+
+class SourceQueueBatchTests(unittest.TestCase):
+    """Keep all nineteen actual queue results bound to fresh producers and refs."""
+
+    def setUp(self) -> None:
+        self.fixture = SourceBudgetTests()._fixtures()[0]
+        self.fixture.branch = "gh-readonly-queue/main/pr-7-base"
+        self.fixture.statuses = []
+        self.ref = "refs/heads/" + self.fixture.branch
+        for runs in self.fixture.runs.values():
+            runs[0]["head_branch"] = self.fixture.branch
+        ci = self.fixture.runs["ci.yml"][0]
+        for position, name in enumerate(
+            (
+                "Discover CI inputs",
+                "Flake lock (flake.lock) / check",
+                "Flake lock (flake/dev/flake.lock) / check",
+            ),
+            50,
+        ):
+            self.fixture.jobs[ci["id"]].append(
+                {
+                    "id": ci["id"] * 100 + position,
+                    "run_id": ci["id"],
+                    "run_attempt": 1,
+                    "name": name,
+                    "head_sha": self.fixture.sha,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "html_url": f"https://github.com/{queue.REPOSITORY}/actions/runs/{ci['id']}/job/{ci['id'] * 100 + position}",
+                }
+            )
+        self.runs = [
+            {**runs[0], "queue_workflow": workflow}
+            for workflow, runs in self.fixture.runs.items()
+        ]
+        self.reads = []
+
+    def report(self, mutation: str = "") -> bool:
+        posts = 0
+
+        def api(path: str, method: str = "GET", data: object = None) -> Any:
+            nonlocal posts
+            if method == "GET":
+                self.reads.append(path)
+            if mutation == "changed_before" and "/git/ref/" in path:
+                self.fixture.head = "b" * 40
+            result = self.fixture._api(path, method, data)
+            if method == "POST":
+                posts += 1
+                if posts == 1:
+                    if mutation == "changed_after":
+                        self.fixture.head = "b" * 40
+                    elif mutation == "new_attempt":
+                        self.fixture.runs["ci.yml"][0].update(
+                            run_attempt=2, status="in_progress", conclusion=None
+                        )
+                    elif mutation == "new_run":
+                        self.fixture.runs["ci.yml"][0].update(
+                            id=9999, status="in_progress", conclusion=None
+                        )
+            return result
+
+        with (
+            patch.object(queue, "api", side_effect=api),
+            patch.object(queue, "SOURCE_CHECKS", self.fixture.checks),
+            patch.object(queue, "WORKFLOWS", list(self.fixture.checks)),
+            patch.object(queue, "SOURCE_CACHE", {}),
+            patch.object(queue, "SOURCE_RUN_LISTS", {}),
+        ):
+            return queue.publish_dispatch_results(self.ref, self.fixture.sha, self.runs)
+
+    def test_all_nineteen_results_keep_exact_job_links_with_two_ref_leases(
+        self,
+    ) -> None:
+        self.assertTrue(self.report())
+        results = [data for _path, data in self.fixture.writes]
+        expected = {
+            job["name"]: job["html_url"]
+            for jobs in self.fixture.jobs.values()
+            for job in jobs
+        }
+        self.assertEqual(len(results), 19)
+        self.assertEqual(
+            {data["context"]: data["target_url"] for data in results}, expected
+        )
+        self.assertEqual({data["state"] for data in results}, {"success"})
+        self.assertEqual(sum("/git/ref/" in path for path in self.reads), 2)
+        self.assertEqual(
+            sum("/actions/runs?head_sha=" in path for path in self.reads), 2
+        )
+
+    def test_changed_queue_ref_before_batch_writes_nothing(self) -> None:
+        self.assertFalse(self.report("changed_before"))
+        self.assertEqual(self.fixture.writes, [])
+
+    def test_changed_ref_after_batch_only_writes_old_immutable_sha_and_cannot_advance(
+        self,
+    ) -> None:
+        self.assertFalse(self.report("changed_after"))
+        self.assertEqual(len(self.fixture.writes), 19)
+        self.assertTrue(
+            all(
+                path.endswith("/" + self.fixture.sha)
+                for path, _data in self.fixture.writes
+            )
+        )
+
+    def test_new_attempt_or_producer_after_batch_invalidates_every_published_success(
+        self,
+    ) -> None:
+        for mutation in ("new_attempt", "new_run"):
+            self.setUp()
+            with self.subTest(mutation=mutation):
+                self.assertFalse(self.report(mutation))
+                results = [data for _path, data in self.fixture.writes]
+                self.assertEqual(
+                    [data["state"] for data in results],
+                    ["success"] * 19 + ["pending"] * 19,
+                )
+
+    def test_actual_failed_job_preserves_failure_link_and_no_success(self) -> None:
+        run = self.fixture.runs["ci.yml"][0]
+        run["conclusion"] = "failure"
+        self.runs[0]["conclusion"] = "failure"
+        job = self.fixture.jobs[run["id"]][0]
+        job["conclusion"] = "failure"
+        self.assertFalse(self.report())
+        self.assertEqual(
+            [data["state"] for _path, data in self.fixture.writes], ["failure"]
+        )
+        self.assertEqual(self.fixture.writes[0][1]["target_url"], job["html_url"])
+
+    def test_wrong_job_run_or_attempt_never_produces_success(self) -> None:
+        for field in ("run_id", "run_attempt"):
+            self.setUp()
+            self.fixture.jobs[self.runs[0]["id"]][0][field] = 999
+            with self.subTest(field=field):
+                self.assertFalse(self.report())
+                self.assertEqual(self.fixture.writes, [])
+
+    def test_same_sha_main_push_does_not_replace_real_queue_codeql_evidence(
+        self,
+    ) -> None:
+        run = self.fixture.runs["codeql.yml"][0]
+        main_push = {
+            **run,
+            "id": run["id"] + 1000,
+            "event": "push",
+            "head_branch": "main",
+        }
+        self.fixture.runs["codeql.yml"].insert(0, main_push)
+        self.assertTrue(self.report())
+        links = [data["target_url"] for _path, data in self.fixture.writes]
+        self.assertEqual(len(links), 19)
+        self.assertTrue(all(f"/runs/{main_push['id']}/" not in link for link in links))
+
+    def test_lingering_refs_with_main_pushes_do_not_block_new_live_front_dispatch(
+        self,
+    ) -> None:
+        old = self.fixture
+        older = copy.deepcopy(old)
+        older.sha = "c" * 40
+        older.head = older.sha
+        older.branch = "gh-readonly-queue/main/older"
+        new_jobs = {}
+        for runs in older.runs.values():
+            run = runs[0]
+            jobs = older.jobs[run["id"]]
+            run.update(
+                id=run["id"] + 1000, head_sha=older.sha, head_branch=older.branch
+            )
+            for job in jobs:
+                job.update(id=job["id"] + 100000, run_id=run["id"], head_sha=older.sha)
+                job["html_url"] = (
+                    f"https://github.com/{queue.REPOSITORY}/actions/runs/{run['id']}/job/{job['id']}"
+                )
+            new_jobs[run["id"]] = jobs
+        older.jobs = new_jobs
+        for fixture in (old, older):
+            run = fixture.runs["codeql.yml"][0]
+            fixture.runs["codeql.yml"].insert(
+                0,
+                {
+                    **run,
+                    "id": run["id"] + 10000,
+                    "event": "push",
+                    "head_branch": "main",
+                },
+            )
+            fixture.statuses = [
+                {
+                    "context": job["name"],
+                    "state": "success",
+                    "target_url": job["html_url"],
+                    "description": "Mirrored queue job result",
+                }
+                for jobs in fixture.jobs.values()
+                for job in jobs
+            ]
+        new_sha = "d" * 40
+        new_ref = queue.QUEUE_PREFIX + "next"
+        refs = [
+            {"ref": "refs/heads/" + fixture.branch, "object": {"sha": fixture.sha}}
+            for fixture in (old, older)
+        ] + [{"ref": new_ref, "object": {"sha": new_sha}}]
+        dispatched = []
+
+        def api(path: str, method: str = "GET", data: object = None) -> Any:
+            if method == "POST":
+                self.assertTrue(path.endswith("/dispatches"))
+                dispatched.append(data)
+                return None
+            if "/git/matching-refs/" in path:
+                return refs
+            if "head_sha=" + new_sha in path:
+                return {"total_count": 0, "workflow_runs": []}
+            if "/git/commits/" in path:
+                return {"parents": [{"sha": old.base}]}
+            if path.endswith(new_ref.removeprefix("refs/")):
+                return {"object": {"sha": new_sha}}
+            if (
+                older.sha in path
+                or older.branch in path
+                or any(f"/runs/{run_id}/" in path for run_id in older.jobs)
+            ):
+                return older._api(path, method, data)
+            return old._api(path, method, data)
+
+        response = {
+            "repository": {
+                "pullRequests": {"pageInfo": {"hasNextPage": False}, "nodes": []}
+            }
+        }
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "SOURCE_RUN_ID": str(self.runs[1]["id"]),
+                    "SOURCE_RUN_ATTEMPT": "",
+                    "SOURCE_NOTIFICATION_ACTIVITY": "",
+                },
+            ),
+            patch.object(queue, "api", side_effect=api),
+            patch.object(queue, "graphql", return_value=response),
+            patch.object(queue, "SOURCE_CHECKS", old.checks),
+            patch.object(queue, "WORKFLOWS", list(old.checks)),
+            patch.object(queue, "SOURCE_HEAD", ""),
+            patch.object(queue, "SOURCE_ACTIVITY", ""),
+        ):
+            queue.main()
+        self.assertEqual(len(dispatched), 5)
+        self.assertEqual(
+            {data["ref"] for data in dispatched}, {new_ref.removeprefix("refs/heads/")}
+        )
+        self.assertEqual(old.writes + older.writes, [])
+
+    def test_nonqueue_branch_producer_is_not_candidate_evidence(self) -> None:
+        self.fixture.runs["ci.yml"][0]["head_branch"] = "main"
+        with (
+            patch.object(queue, "api", side_effect=self.fixture._api),
+            patch.object(queue, "SOURCE_CHECKS", self.fixture.checks),
+            patch.object(queue, "WORKFLOWS", list(self.fixture.checks)),
+            patch.object(queue, "SOURCE_CACHE", {}),
+        ):
+            self.assertNotIn(
+                "ci.yml", queue.queue_run_inventory(self.ref, self.fixture.sha)
+            )
+
+    def test_aggregate_rejects_tampered_path_branch_repository_and_truncated_inventory(
+        self,
+    ) -> None:
+        for field, value in (
+            ("path", ".github/workflows/wrong.yml"),
+            ("repository", {"full_name": "other/repo"}),
+            ("head_repository", {"full_name": "other/repo"}),
+            ("run_attempt", 0),
+        ):
+            self.setUp()
+            self.fixture.runs["ci.yml"][0][field] = value
+            with (
+                self.subTest(field=field),
+                patch.object(queue, "api", side_effect=self.fixture._api),
+                patch.object(queue, "SOURCE_CHECKS", self.fixture.checks),
+                patch.object(queue, "WORKFLOWS", list(self.fixture.checks)),
+                patch.object(queue, "SOURCE_CACHE", {}),
+                self.assertRaises(ValueError),
+            ):
+                queue.queue_run_inventory(self.ref, self.fixture.sha)
+        with (
+            patch.object(
+                queue, "api", return_value={"total_count": 100, "workflow_runs": []}
+            ),
+            self.assertRaises(ValueError),
+        ):
+            queue.queue_run_inventory(self.ref, self.fixture.sha)
