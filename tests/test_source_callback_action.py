@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,7 +14,7 @@ import yaml
 class SourceCallbackActionTests(unittest.TestCase):
     """Keep existing queue callers compatible and bind source attempt notifications."""
 
-    def invoke(self, activity: str) -> tuple[int, list[str]]:
+    def invoke(self, activity: str) -> tuple[int, list[str], str]:
         action = yaml.load(
             (
                 Path(__file__).parents[1] / "actions/queue-completion/action.yml"
@@ -25,7 +26,7 @@ class SourceCallbackActionTests(unittest.TestCase):
             receipt = root / "arguments.json"
             gh = root / "gh"
             gh.write_text(
-                "#!/usr/bin/env python3\nimport json, os, sys\n"
+                f"#!{sys.executable}\nimport json, os, sys\n"
                 "from pathlib import Path\n"
                 "Path(os.environ['CALLBACK_RECEIPT']).write_text(json.dumps(sys.argv[1:]))\n"
             )
@@ -45,13 +46,15 @@ class SourceCallbackActionTests(unittest.TestCase):
                 text=True,
                 check=False,
             )
-            return result.returncode, json.loads(
-                receipt.read_text()
-            ) if receipt.exists() else []
+            return (
+                result.returncode,
+                json.loads(receipt.read_text()) if receipt.exists() else [],
+                result.stderr,
+            )
 
     def test_legacy_queue_payload_is_unchanged(self) -> None:
-        status, args = self.invoke("")
-        self.assertEqual(status, 0)
+        status, args, stderr = self.invoke("")
+        self.assertEqual(status, 0, stderr)
         self.assertEqual(
             args,
             [
@@ -68,13 +71,13 @@ class SourceCallbackActionTests(unittest.TestCase):
     def test_source_start_and_completion_bind_actual_attempt(self) -> None:
         for activity in ("in_progress", "completed"):
             with self.subTest(activity=activity):
-                status, args = self.invoke(activity)
-                self.assertEqual(status, 0)
+                status, args, stderr = self.invoke(activity)
+                self.assertEqual(status, 0, stderr)
                 self.assertIn("source_run_id=123", args)
                 self.assertIn("source_run_attempt=2", args)
                 self.assertIn(f"source_activity={activity}", args)
 
     def test_invalid_phase_cannot_dispatch(self) -> None:
-        status, args = self.invoke("completed --ref unreviewed")
-        self.assertNotEqual(status, 0)
+        status, args, stderr = self.invoke("completed --ref unreviewed")
+        self.assertNotEqual(status, 0, stderr)
         self.assertEqual(args, [])
