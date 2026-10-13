@@ -25,6 +25,14 @@ queue = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(queue)
 
 
+def snapshot_fixture(fixture: Any) -> list[dict[str, Any]]:
+    """Expose the same immutable-head statuses as the GraphQL projection."""
+    queue.SOURCE_VIEW[fixture.sha] = {
+        status["context"]: status for status in fixture.statuses
+    }
+    return [fixture.pr]
+
+
 class ReconcileTests(unittest.TestCase):
     """Keep CI and queue failures observable without executing PR code."""
 
@@ -1008,6 +1016,19 @@ class PackageSourceTests(unittest.TestCase):
         if method != "GET":
             self.writes.append((path, data))
             return None
+        if "/actions/workflows?" in path:
+            workflows = [
+                {
+                    "id": index,
+                    "path": f".github/workflows/{workflow}",
+                    "state": "active",
+                }
+                for index, workflow in enumerate(self.checks, 1)
+            ]
+            return {"total_count": len(workflows), "workflows": workflows}
+        if "/actions/runs?head_sha=" in path:
+            runs = [run for group in self.runs.values() for run in group]
+            return {"total_count": len(runs), "workflow_runs": runs}
         if "/git/commits/" in path:
             return {"parents": self.parents}
         if f"compare/{self.base}...{self.base}" in path:
@@ -1478,7 +1499,7 @@ class SourceBudgetTests(unittest.TestCase):
 
     def test_rerun_event_invalidates_even_an_admitted_source(self) -> None:
         counts = self._case("admitted_event")
-        self.assertEqual(counts, {"get": 35, "write": 17, "jobs": 0})
+        self.assertEqual(counts, {"get": 5, "write": 17, "jobs": 0})
 
     def test_initial_requested_event_with_no_attestation_stops_immediately(
         self,
@@ -1759,6 +1780,11 @@ class SourceNotificationTests(unittest.TestCase):
             patch.object(queue, "SOURCE_HEAD", ""),
             patch.object(queue, "SOURCE_ACTIVITY", ""),
             patch.object(queue, "wait_for_source_run") as wait,
+            patch.object(
+                queue,
+                "source_snapshot",
+                side_effect=lambda *args: snapshot_fixture(self.fixture),
+            ),
             patch.object(queue, "graphql") as graphql,
         ):
             queue.main()
@@ -1934,3 +1960,121 @@ class QueueAdvanceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceSnapshotTests(unittest.TestCase):
+    """Check live-ref projection and batch leases independently of native jobs."""
+
+    def node(self) -> dict[str, Any]:
+        return {
+            "number": 7,
+            "id": "PR7",
+            "isDraft": False,
+            "baseRefName": "main",
+            "headRefName": "automation/package-updates-example",
+            "headRefOid": "a" * 40,
+            "author": {
+                "__typename": "Bot",
+                "databaseId": 41898282,
+                "login": "github-actions",
+            },
+            "headRepository": {"nameWithOwner": queue.REPOSITORY},
+            "headRef": {
+                "name": "automation/package-updates-example",
+                "repository": {"nameWithOwner": queue.REPOSITORY},
+                "target": {"oid": "a" * 40, "status": {"contexts": []}},
+            },
+        }
+
+    def snapshot(
+        self, node: dict[str, Any], truncated: bool = False
+    ) -> list[dict[str, Any]]:
+        response = {
+            "repository": {
+                "pullRequests": {
+                    "pageInfo": {"hasNextPage": truncated},
+                    "nodes": [node],
+                }
+            }
+        }
+        with (
+            patch.object(queue, "graphql", return_value=response),
+            patch.object(queue, "SOURCE_VIEW", {}),
+        ):
+            return queue.source_snapshot()
+
+    def test_exact_bot_projection_preserves_source_identity(self) -> None:
+        self.assertTrue(queue.source_identity(self.snapshot(self.node())[0]))
+
+    def test_login_alone_does_not_prove_bot_identity(self) -> None:
+        node = self.node()
+        node["author"]["__typename"] = "User"
+        self.assertFalse(queue.source_identity(self.snapshot(node)[0]))
+
+    def test_inconsistent_live_head_and_cross_repository_ref_rejected(self) -> None:
+        for mutation in ("oid", "repository", "name"):
+            node = self.node()
+            if mutation == "oid":
+                node["headRef"]["target"]["oid"] = "b" * 40
+            elif mutation == "repository":
+                node["headRef"]["repository"]["nameWithOwner"] = "other/repository"
+            else:
+                node["headRef"]["name"] = "other-branch"
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                self.snapshot(node)
+
+    def test_truncated_pull_inventory_is_not_silently_accepted(self) -> None:
+        with self.assertRaises(ValueError):
+            self.snapshot(self.node(), truncated=True)
+
+    def test_duplicate_status_context_rejected(self) -> None:
+        node = self.node()
+        value = {
+            "context": "DCO sign-off",
+            "state": "SUCCESS",
+            "targetUrl": "url",
+            "description": "real",
+            "creator": node["author"],
+        }
+        node["headRef"]["target"]["status"]["contexts"] = [value, value]
+        with self.assertRaises(ValueError):
+            self.snapshot(node)
+
+    def test_missing_deleted_ref_is_not_an_admission_lease(self) -> None:
+        node = self.node()
+        node["headRef"] = None
+        self.assertEqual(self.snapshot(node), [])
+
+    def test_aggregate_run_inventory_rejects_truncation_and_count_mismatch(
+        self,
+    ) -> None:
+        for response in (
+            {"total_count": 100, "workflow_runs": []},
+            {"total_count": 1, "workflow_runs": []},
+        ):
+            with (
+                patch.object(queue, "api", return_value=response),
+                self.assertRaises(ValueError),
+            ):
+                queue.source_run_inventory({"head": {"sha": "a" * 40}})
+
+    def test_partial_ci_does_not_hide_real_terminal_dco_failure(self) -> None:
+        fixture = PackageSourceTests()
+        fixture.setUp()
+        fixture.runs["ci.yml"][0].update(status="in_progress", conclusion=None)
+        run = fixture.runs["dco.yml"][0]
+        run["conclusion"] = "failure"
+        fixture.jobs[run["id"]][0]["conclusion"] = "failure"
+        with (
+            patch.object(queue, "api", side_effect=fixture._api),
+            patch.object(queue, "SOURCE_CHECKS", fixture.checks),
+            patch.object(queue, "WORKFLOWS", list(fixture.checks)),
+            patch.object(queue, "SOURCE_CALLBACK", False),
+            patch.object(queue, "SOURCE_CACHE", {}),
+            patch.object(queue, "SOURCE_EVIDENCE", {}),
+        ):
+            self.assertIsNone(queue.source_jobs(fixture.pr))
+            self.assertEqual(
+                queue.SOURCE_EVIDENCE[fixture.sha]["failures"][0]["html_url"],
+                fixture.jobs[run["id"]][0]["html_url"],
+            )
