@@ -33,7 +33,7 @@ class SourceCallbackActionTests(unittest.TestCase):
             )
             gh.chmod(0o755)
             sleeper = root / "sleep"
-            sleeper.write_text("#!/bin/sh\nexit 0\n")
+            sleeper.write_text(f"#!{sys.executable}\n")
             sleeper.chmod(0o755)
             result = subprocess.run(
                 ["bash", "-e", "-c", action["runs"]["steps"][0]["run"]],
