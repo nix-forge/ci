@@ -1260,7 +1260,11 @@ class PackageSourceTests(unittest.TestCase):
                 "state": "success",
                 "target_url": job["html_url"],
                 "description": f"{queue.SOURCE_REPORT} result; attempt 1",
-                "creator": {"id": 41898282},
+                "creator": {
+                    "id": 41898282,
+                    "type": "Bot",
+                    "login": "github-actions[bot]",
+                },
             }
             for jobs in self.jobs.values()
             for job in jobs
@@ -1310,7 +1314,16 @@ class PackageSourceTests(unittest.TestCase):
         def api(path: str, method: str = "GET", data: object = None) -> Any:
             result = self._api(path, method, data)
             if method == "POST":
-                self.statuses.append({**data, "creator": {"id": 41898282}})
+                self.statuses.append(
+                    {
+                        **data,
+                        "creator": {
+                            "id": 41898282,
+                            "type": "Bot",
+                            "login": "github-actions[bot]",
+                        },
+                    }
+                )
                 if len(self.writes) == 1:
                     self.runs["ci.yml"][0].update(
                         run_attempt=2, status="in_progress", conclusion=None
@@ -1657,6 +1670,11 @@ class SourceNotificationTests(unittest.TestCase):
                     patch.object(queue, "SOURCE_EVIDENCE", {}),
                     patch.object(queue, "admit") as admit,
                     patch.object(queue, "dispatch_entry") as dispatch,
+                    patch.object(
+                        queue,
+                        "source_ref",
+                        return_value=None if reason == "deleted" else self.fixture.head,
+                    ),
                     patch.object(queue, "graphql") as graphql,
                     contextlib.redirect_stdout(output),
                 ):
@@ -1780,6 +1798,7 @@ class SourceNotificationTests(unittest.TestCase):
             patch.object(queue, "SOURCE_HEAD", ""),
             patch.object(queue, "SOURCE_ACTIVITY", ""),
             patch.object(queue, "wait_for_source_run") as wait,
+            patch.object(queue, "source_ref", return_value=self.fixture.sha),
             patch.object(
                 queue,
                 "source_snapshot",
@@ -2009,7 +2028,7 @@ class SourceSnapshotTests(unittest.TestCase):
     def test_login_alone_does_not_prove_bot_identity(self) -> None:
         node = self.node()
         node["author"]["__typename"] = "User"
-        self.assertFalse(queue.source_identity(self.snapshot(node)[0]))
+        self.assertEqual(self.snapshot(node), [])
 
     def test_inconsistent_live_head_and_cross_repository_ref_rejected(self) -> None:
         for mutation in ("oid", "repository", "name"):
@@ -2039,6 +2058,40 @@ class SourceSnapshotTests(unittest.TestCase):
         node["headRef"]["target"]["status"]["contexts"] = [value, value]
         with self.assertRaises(ValueError):
             self.snapshot(node)
+
+    def test_human_fork_does_not_abort_two_owned_source_heads(self) -> None:
+        first = self.node()
+        second = self.node()
+        second["number"] = 8
+        second["id"] = "PR8"
+        second["headRefOid"] = "b" * 40
+        second["headRef"]["target"]["oid"] = "b" * 40
+        fork = self.node()
+        fork["author"] = {"__typename": "User", "login": "contributor"}
+        fork["headRepository"]["nameWithOwner"] = "contributor/fork"
+        fork["headRef"]["repository"]["nameWithOwner"] = "contributor/fork"
+        response = {
+            "repository": {
+                "pullRequests": {
+                    "pageInfo": {"hasNextPage": False},
+                    "nodes": [fork, first, second],
+                }
+            }
+        }
+        with (
+            patch.dict(os.environ, {"SOURCE_RUN_ID": "123"}),
+            patch.object(queue, "SOURCE_CHECKS", {"ci.yml": ["Build"]}),
+            patch.object(
+                queue, "source_notification", return_value=("a" * 40, "completed")
+            ),
+            patch.object(queue, "source_readiness"),
+            patch.object(queue, "graphql", return_value=response),
+            patch.object(queue, "admit", return_value=False) as admit,
+        ):
+            queue.main()
+        self.assertEqual(
+            [call.args[0]["number"] for call in admit.call_args_list], [7, 8]
+        )
 
     def test_missing_deleted_ref_is_not_an_admission_lease(self) -> None:
         node = self.node()
@@ -2078,3 +2131,210 @@ class SourceSnapshotTests(unittest.TestCase):
                 queue.SOURCE_EVIDENCE[fixture.sha]["failures"][0]["html_url"],
                 fixture.jobs[run["id"]][0]["html_url"],
             )
+
+
+class SourceReadinessTests(unittest.TestCase):
+    """Keep the cheap readiness path read-only and fail closed on partial evidence."""
+
+    def setUp(self) -> None:
+        self.fixture = PackageSourceTests()
+        self.fixture.setUp()
+        self.fixture._attest()
+        self.fixture.statuses.append({"context": queue.ADMISSION, "state": "success"})
+        self.suites = []
+        for runs in self.fixture.runs.values():
+            run = runs[0]
+            self.suites.append(
+                {
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "repository": {"nameWithOwner": queue.REPOSITORY},
+                    "commit": {"oid": self.fixture.sha},
+                    "branch": {
+                        "name": self.fixture.branch,
+                        "repository": {"nameWithOwner": queue.REPOSITORY},
+                    },
+                    "workflowRun": {
+                        "databaseId": run["id"],
+                        "runAttempt": run["run_attempt"],
+                        "event": run["event"],
+                        "file": {"path": run["path"]},
+                        "workflow": {
+                            "databaseId": run["workflow_id"],
+                            "state": "ACTIVE",
+                        },
+                    },
+                }
+            )
+
+    def response(self, truncated: bool = False) -> dict[str, Any]:
+        return {
+            "repository": {
+                "head0": {
+                    "oid": self.fixture.sha,
+                    "checkSuites": {
+                        "pageInfo": {"hasNextPage": truncated},
+                        "nodes": self.suites,
+                    },
+                }
+            }
+        }
+
+    def test_readiness_rejects_truncated_missing_and_tampered_suite_identity(
+        self,
+    ) -> None:
+        for mode in (
+            "truncated",
+            "missing",
+            "branch",
+            "repository",
+            "workflow",
+            "head",
+            "approval",
+        ):
+            self.setUp()
+            if mode == "missing":
+                self.suites.pop()
+            elif mode == "branch":
+                self.suites[0]["branch"]["name"] = "wrong"
+            elif mode == "repository":
+                self.suites[0]["repository"]["nameWithOwner"] = "other/repo"
+            elif mode == "workflow":
+                self.suites[0]["workflowRun"]["workflow"]["databaseId"] = 99
+            elif mode == "head":
+                self.suites[0]["commit"]["oid"] = "b" * 40
+            elif mode == "approval":
+                self.suites[0]["conclusion"] = "ACTION_REQUIRED"
+            with (
+                self.subTest(mode=mode),
+                patch.object(
+                    queue, "graphql", return_value=self.response(mode == "truncated")
+                ),
+                patch.object(queue, "api", side_effect=self.fixture._api),
+                patch.object(queue, "SOURCE_CHECKS", self.fixture.checks),
+                patch.object(queue, "WORKFLOWS", list(self.fixture.checks)),
+                patch.object(queue, "SOURCE_CACHE", {}),
+                patch.object(queue, "SOURCE_PREFLIGHT", {}),
+            ):
+                queue.source_readiness([self.fixture.pr])
+                self.assertNotIn(self.fixture.sha, queue.SOURCE_PREFLIGHT)
+
+    def report(self, projected: bool = True) -> bool:
+        statuses = {value["context"]: value for value in self.fixture.statuses}
+        with (
+            patch.object(queue, "api", side_effect=self.fixture._api),
+            patch.object(queue, "graphql", return_value=self.response()),
+            patch.object(queue, "source_lease", return_value=True),
+            patch.object(queue, "SOURCE_CHECKS", self.fixture.checks),
+            patch.object(queue, "WORKFLOWS", list(self.fixture.checks)),
+            patch.object(queue, "SOURCE_CACHE", {}),
+            patch.object(queue, "SOURCE_PREFLIGHT", {}),
+            patch.object(queue, "SOURCE_EVIDENCE", {}),
+            patch.object(queue, "SOURCE_RUN_LISTS", {}),
+            patch.object(queue, "SOURCE_CALLBACK", True),
+            patch.object(queue, "SOURCE_HEAD", ""),
+        ):
+            if projected:
+                queue.source_readiness([self.fixture.pr])
+            return queue.reconcile_source(self.fixture.pr, statuses)
+
+    def test_failed_current_run_with_old_greens_cannot_take_either_duplicate_shortcut(
+        self,
+    ) -> None:
+        for projected in (False, True):
+            self.setUp()
+            run = self.fixture.runs["dco.yml"][0]
+            run["conclusion"] = "failure"
+            self.suites[-1]["conclusion"] = "FAILURE"
+            self.fixture.jobs[run["id"]][0]["conclusion"] = "failure"
+            with self.subTest(projected=projected):
+                self.assertFalse(self.report(projected))
+                failures = [
+                    data
+                    for _path, data in self.fixture.writes
+                    if data["state"] == "failure"
+                ]
+                self.assertEqual(len(failures), 1)
+                self.assertEqual(
+                    failures[0]["target_url"],
+                    self.fixture.jobs[run["id"]][0]["html_url"],
+                )
+
+    def test_missing_ci_producer_does_not_hide_later_failed_dco(self) -> None:
+        self.fixture.runs["ci.yml"] = []
+        self.suites.pop(0)
+        run = self.fixture.runs["dco.yml"][0]
+        run["conclusion"] = "failure"
+        self.fixture.jobs[run["id"]][0]["conclusion"] = "failure"
+        self.assertFalse(self.report())
+        self.assertEqual(
+            [
+                data["target_url"]
+                for _path, data in self.fixture.writes
+                if data["state"] == "failure"
+            ],
+            [self.fixture.jobs[run["id"]][0]["html_url"]],
+        )
+
+    def test_known_pending_ci_and_failed_dco_preserve_actual_failure_url(self) -> None:
+        run = self.fixture.runs["ci.yml"][0]
+        run.update(status="in_progress", conclusion=None)
+        self.suites[0].update(status="IN_PROGRESS", conclusion=None)
+        run = self.fixture.runs["dco.yml"][0]
+        run["conclusion"] = "failure"
+        self.suites[-1]["conclusion"] = "FAILURE"
+        self.fixture.jobs[run["id"]][0]["conclusion"] = "failure"
+        self.assertFalse(self.report())
+        self.assertEqual(
+            [
+                data["target_url"]
+                for _path, data in self.fixture.writes
+                if data["state"] == "failure"
+            ],
+            [self.fixture.jobs[run["id"]][0]["html_url"]],
+        )
+
+    def test_new_attempt_invalidates_old_managed_greens(self) -> None:
+        self.fixture.runs["ci.yml"][0].update(
+            run_attempt=2, status="in_progress", conclusion=None
+        )
+        self.suites[0].update(status="IN_PROGRESS", conclusion=None)
+        self.suites[0]["workflowRun"]["runAttempt"] = 2
+        self.assertFalse(self.report())
+        self.assertTrue(self.fixture.writes)
+        self.assertEqual(
+            {data["state"] for _path, data in self.fixture.writes}, {"pending"}
+        )
+
+    def test_duplicate_completed_callback_does_not_fetch_jobs_or_publish(self) -> None:
+        self.fixture.fail_jobs_api = True
+        self.assertTrue(self.report())
+        self.assertEqual(self.fixture.writes, [])
+
+
+class SourcePacingTests(unittest.TestCase):
+    """Read operations do not consume the paced source content-write slots."""
+
+    def test_actual_transport_paces_rest_and_enqueue_but_not_graphql_reads(
+        self,
+    ) -> None:
+        now = [0.0]
+        sleeps = []
+
+        def sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        response = subprocess.CompletedProcess([], 0, "{}")
+        with (
+            patch.object(queue, "SOURCE_CALLBACK", True),
+            patch.object(queue, "SOURCE_LAST_WRITE", None),
+            patch.object(queue.time, "monotonic", side_effect=lambda: now[0]),
+            patch.object(queue.time, "sleep", side_effect=sleep),
+            patch.object(queue.subprocess, "run", return_value=response),
+        ):
+            queue.api("repos/example/statuses/sha", "POST", {})
+            queue.api("graphql", "POST", {"query": "query {viewer {login}}"})
+            queue.api("graphql", "POST", {"query": "mutation { enqueuePullRequest }"})
+            queue.api("repos/example/dispatches", "POST", {})
+        self.assertEqual(sleeps, [4.0, 4.0])

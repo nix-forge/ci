@@ -38,6 +38,8 @@ SOURCE_CALLBACK = False
 SOURCE_SWEEP = False
 SOURCE_VIEW: dict[str, Any] = {}
 SOURCE_RUN_LISTS: dict[str, Any] = {}
+SOURCE_PREFLIGHT: dict[str, Any] = {}
+SOURCE_LAST_WRITE: float | None = None
 PAGE_SIZE = 100
 GH = shutil.which("gh") or "/usr/bin/gh"
 
@@ -49,6 +51,20 @@ def api(path: str, method: str = "GET", data: object = None) -> Any:  # ruff: ig
         The decoded response, or None for an empty response.
 
     """
+    global SOURCE_LAST_WRITE
+    writes = method != "GET" and (
+        path != "graphql"
+        or (
+            isinstance(data, dict) and str(data.get("query", "")).startswith("mutation")
+        )
+    )
+    if SOURCE_CALLBACK and writes:
+        # A six-source sweep publishes 102 statuses. Pace all content writes,
+        # including enqueue/dispatch, leaving room for 60 notifier requests.
+        now = time.monotonic()
+        if SOURCE_LAST_WRITE is not None:
+            time.sleep(max(0.0, 4.0 - (now - SOURCE_LAST_WRITE)))
+        SOURCE_LAST_WRITE = time.monotonic()
     command = [GH, "api", path, "--method", method]
     if data is not None:
         command += ["--input", "-"]
@@ -92,7 +108,9 @@ def admit(pr: dict[str, Any]) -> bool:
         sha = pr["head"]["sha"]
         if SOURCE_HEAD and not SOURCE_SWEEP and SOURCE_HEAD != sha:
             return False
-        source_statuses = SOURCE_VIEW[sha] if SOURCE_CALLBACK else read_statuses(sha)
+        source_statuses = SOURCE_VIEW.get(sha)
+        if source_statuses is None:
+            source_statuses = read_statuses(sha)
         if (
             not SOURCE_HEAD
             and not SOURCE_SWEEP
@@ -545,15 +563,22 @@ def source_notification(
             )
         if run["run_attempt"] != int(attempt):
             raise ValueError("Source callback producer attempt moved backwards")
-    try:
-        ref = api(f"repos/{REPOSITORY}/git/ref/heads/{quote(branch, safe='/')}")
-    except subprocess.CalledProcessError as error:
-        if "HTTP 404" not in (error.stderr or ""):
-            raise
-        raise ObsoleteSourceNotification(
-            "Verified source producer branch no longer exists"
-        ) from error
-    current_sha = ref.get("object", {}).get("sha")
+    if SOURCE_CALLBACK:
+        current_sha = source_ref(branch)
+        if current_sha is None:
+            raise ObsoleteSourceNotification(
+                "Verified source producer branch no longer exists"
+            )
+    else:
+        try:
+            ref = api(f"repos/{REPOSITORY}/git/ref/heads/{quote(branch, safe='/')}")
+        except subprocess.CalledProcessError as error:
+            if "HTTP 404" not in (error.stderr or ""):
+                raise
+            raise ObsoleteSourceNotification(
+                "Verified source producer branch no longer exists"
+            ) from error
+        current_sha = ref.get("object", {}).get("sha")
     if (
         not isinstance(current_sha, str)
         or re.fullmatch(r"[0-9a-f]{40}", current_sha) is None
@@ -583,6 +608,15 @@ def front_queue_entry() -> dict[str, Any] | None:
     merge_queue = repository["mergeQueue"]
     entries = merge_queue["entries"]["nodes"] if merge_queue else []
     return entries[0] if entries else None
+
+
+def source_bot(actor: dict[str, Any]) -> bool:
+    """Require the canonical GitHub Actions bot identity, never login alone."""
+    return (
+        actor.get("id") == 41898282
+        and actor.get("type") == "Bot"
+        and actor.get("login") == "github-actions[bot]"
+    )
 
 
 def source_identity(pr: dict[str, Any]) -> bool:
@@ -635,7 +669,10 @@ def source_read(path: str) -> Any:  # ruff: ignore[any-type]
                 filename = item.get("path", "").removeprefix(".github/workflows/")
                 if filename in WORKFLOWS:
                     key = f"repos/{REPOSITORY}/actions/workflows/{filename}"
-                    if key in SOURCE_CACHE and SOURCE_CACHE[key] != item:
+                    if key in SOURCE_CACHE and any(
+                        SOURCE_CACHE[key].get(field) != item.get(field)
+                        for field in ("id", "path", "state")
+                    ):
                         raise ValueError("Workflow identity changed within callback")
                     SOURCE_CACHE[key] = item
         if path not in SOURCE_CACHE:
@@ -684,6 +721,20 @@ def source_snapshot(number: int | None = None) -> list[dict[str, Any]]:
     pulls = []
     for node in nodes:
         actor = node.get("author") or {}
+        if not (
+            actor.get("__typename") == "Bot"
+            and actor.get("databaseId") == 41898282
+            and actor.get("login") == "github-actions"
+            and (node.get("headRepository") or {}).get("nameWithOwner") == REPOSITORY
+            and node.get("baseRefName") == DEFAULT_BRANCH
+            and re.fullmatch(
+                r"automation/package-updates-[a-z0-9][a-z0-9+._-]*",
+                node.get("headRefName", ""),
+            )
+            is not None
+            and not node.get("isDraft", True)
+        ):
+            continue
         ref = node.get("headRef")
         if not ref:
             continue
@@ -740,6 +791,24 @@ def source_snapshot(number: int | None = None) -> list[dict[str, Any]]:
     return pulls
 
 
+def source_ref(branch: str) -> str | None:
+    """Read the producer's exact current branch without a REST request."""
+    owner, name = REPOSITORY.split("/", 1)
+    ref = graphql(
+        "query($owner:String!,$name:String!,$branch:String!) { "
+        "repository(owner:$owner,name:$name) { ref(qualifiedName:$branch) { "
+        "name repository { nameWithOwner } target { oid } } } }",
+        owner=owner,
+        name=name,
+        branch=f"refs/heads/{branch}",
+    )["repository"]["ref"]
+    if ref is None:
+        return None
+    if ref["name"] != branch or ref["repository"]["nameWithOwner"] != REPOSITORY:
+        raise ValueError("Producer ref identity does not match")
+    return ref["target"]["oid"]
+
+
 def source_lease(pr: dict[str, Any]) -> bool:
     """Recheck the exact live identity before an immutable-SHA write batch."""
     if SOURCE_CALLBACK:
@@ -773,6 +842,79 @@ def source_run_inventory(pr: dict[str, Any]) -> None:
     ):
         raise ValueError("Source run inventory is incomplete")
     SOURCE_RUN_LISTS[sha] = result
+
+
+def source_readiness(pulls: list[dict[str, Any]]) -> None:
+    """Batch fresh bounded check-suite projections for read-only readiness.
+
+    This projection never authorizes result publication or a new admission.
+    Missing, truncated or approval-required evidence takes the full REST path.
+    """
+    sources = [pr for pr in pulls if source_identity(pr)]
+    if not sources:
+        return
+    owner, name = REPOSITORY.split("/", 1)
+    fields = (
+        "oid checkSuites(first:100) { pageInfo { hasNextPage } nodes { "
+        "status conclusion repository { nameWithOwner } commit { oid } "
+        "branch { name repository { nameWithOwner } } workflowRun { "
+        "databaseId runAttempt event file { path } workflow { databaseId state } } } }"
+    )
+    selections = " ".join(
+        f'head{index}:object(expression:"{pr["head"]["sha"]}") {{ ... on Commit {{ {fields} }} }}'
+        for index, pr in enumerate(sources)
+    )
+    result = graphql(
+        "query($owner:String!,$name:String!) { repository(owner:$owner,name:$name) { "
+        + selections
+        + " } }",
+        owner=owner,
+        name=name,
+    )["repository"]
+    for index, pr in enumerate(sources):
+        sha = pr["head"]["sha"]
+        item = result.get(f"head{index}")
+        if not item or item.get("oid") != sha:
+            continue
+        suites = item.get("checkSuites") or {}
+        if suites.get("pageInfo", {}).get("hasNextPage") is not False:
+            continue
+        selected = {}
+        for suite in suites.get("nodes", []):
+            run = suite.get("workflowRun") or {}
+            workflow = run.get("file") or {}
+            filename = workflow.get("path", "").removeprefix(".github/workflows/")
+            if filename not in WORKFLOWS:
+                continue
+            metadata = source_read(f"repos/{REPOSITORY}/actions/workflows/{filename}")
+            branch = suite.get("branch") or {}
+            if not (
+                suite.get("repository", {}).get("nameWithOwner") == REPOSITORY
+                and suite.get("commit", {}).get("oid") == sha
+                and branch.get("name") == pr["head"]["ref"]
+                and branch.get("repository", {}).get("nameWithOwner") == REPOSITORY
+                and run.get("workflow", {}).get("databaseId") == metadata["id"]
+                and run["workflow"].get("state") == "ACTIVE"
+                and workflow.get("path") == f".github/workflows/{filename}"
+                and run.get("event") in {"pull_request", "workflow_dispatch"}
+                and isinstance(run.get("databaseId"), int)
+                and run["databaseId"] > 0
+                and isinstance(run.get("runAttempt"), int)
+                and run["runAttempt"] > 0
+            ):
+                continue
+            record = {
+                "id": run["databaseId"],
+                "run_attempt": run["runAttempt"],
+                "status": suite["status"].lower(),
+                "conclusion": (suite.get("conclusion") or "").lower(),
+            }
+            if filename not in selected or record["id"] > selected[filename]["id"]:
+                selected[filename] = record
+        if set(selected) == set(WORKFLOWS) and not any(
+            run["conclusion"] == "action_required" for run in selected.values()
+        ):
+            SOURCE_PREFLIGHT[sha] = selected
 
 
 def source_contract(pr: dict[str, Any]) -> str | None:
@@ -930,7 +1072,8 @@ def source_jobs(
     for workflow in WORKFLOWS:
         selected = source_run(pr, workflow)
         if selected is None:
-            return None
+            complete = False
+            continue
         run, batch = selected
         evidence["runs"][workflow] = run
         if run.get("status") != "completed":
@@ -949,7 +1092,7 @@ def source_jobs(
             and all(
                 status.get("state") == "success"
                 and status.get("description") == description
-                and status.get("creator", {}).get("id") == 41898282
+                and source_bot(status.get("creator", {}))
                 and re.fullmatch(
                     re.escape(prefix) + r"[0-9]+", status.get("target_url", "")
                 )
@@ -1040,6 +1183,38 @@ def reconcile_source(
         for status in statuses.values()
     ):
         return False
+    projected = SOURCE_PREFLIGHT.get(sha, {}) if SOURCE_CALLBACK else {}
+    if projected and not initial_event:
+        ready = all(run["status"] == "completed" for run in projected.values())
+        failed_run = any(
+            run["conclusion"] in {"failure", "timed_out", "cancelled"}
+            for run in projected.values()
+        )
+        if not ready and not failed_run:
+            initial_event = True
+        elif (
+            ready
+            and statuses.get(ADMISSION, {}).get("state") == "success"
+            and allow_success
+            and all(
+                run["conclusion"] == "success"
+                and status.get("state") == "success"
+                and source_bot(status.get("creator", {}))
+                and status.get("description")
+                == f"{SOURCE_REPORT} result; attempt {run['run_attempt']}"
+                and re.fullmatch(
+                    re.escape(
+                        f"https://github.com/{REPOSITORY}/actions/runs/{run['id']}/job/"
+                    )
+                    + r"[0-9]+",
+                    status.get("target_url", ""),
+                )
+                for workflow, run in projected.items()
+                for context in SOURCE_CHECKS[workflow]
+                for status in [statuses.get(context, {})]
+            )
+        ):
+            return True
     ready = True
     if SOURCE_CALLBACK and not initial_event:
         source_run_inventory(pr)
@@ -1055,8 +1230,9 @@ def reconcile_source(
             # A write-free duplicate callback can reuse only exact current-run
             # attestations. Changed attempts always take the full contract path.
             attested = all(
-                status.get("state") == "success"
-                and status.get("creator", {}).get("id") == 41898282
+                item[0].get("conclusion") == "success"
+                and status.get("state") == "success"
+                and source_bot(status.get("creator", {}))
                 and status.get("description")
                 == f"{SOURCE_REPORT} result; attempt {item[0]['run_attempt']}"
                 and re.fullmatch(
@@ -1178,14 +1354,22 @@ def reconcile_main() -> None:
         subprocess.CalledProcessError: An API error other than a deleted ref occurred.
 
     """
-    global SOURCE_HEAD, SOURCE_ACTIVITY, SOURCE_CALLBACK, SOURCE_SWEEP
+    global \
+        SOURCE_HEAD, \
+        SOURCE_ACTIVITY, \
+        SOURCE_CALLBACK, \
+        SOURCE_SWEEP, \
+        SOURCE_LAST_WRITE
     SOURCE_CACHE.clear()
     SOURCE_EVIDENCE.clear()
     SOURCE_VIEW.clear()
     SOURCE_RUN_LISTS.clear()
+    SOURCE_PREFLIGHT.clear()
+    SOURCE_LAST_WRITE = None
     SOURCE_CALLBACK = False
     SOURCE_SWEEP = False
     run_id = os.environ.get("SOURCE_RUN_ID", "")
+    SOURCE_CALLBACK = bool(run_id and SOURCE_CHECKS)
     try:
         notification = source_notification(
             run_id,
@@ -1196,7 +1380,12 @@ def reconcile_main() -> None:
         print(f"::warning::Ignoring obsolete verified source callback: {error}")
         return
     if notification is None:
+        SOURCE_CALLBACK = False
         wait_for_source_run(run_id)
+        if run_id and SOURCE_CHECKS:
+            # Queue callbacks also scan admitted source PRs. Share one fresh
+            # exact-head status view instead of six independent REST reads.
+            source_snapshot()
     else:
         SOURCE_HEAD, SOURCE_ACTIVITY = notification
         SOURCE_CALLBACK = True
@@ -1208,6 +1397,8 @@ def reconcile_main() -> None:
     while True:
         if SOURCE_CALLBACK:
             pulls = source_snapshot()
+            if SOURCE_SWEEP:
+                source_readiness(pulls)
         else:
             pulls = api(
                 f"repos/{REPOSITORY}/pulls?state=open&base={quote(DEFAULT_BRANCH, safe='')}"
@@ -1272,6 +1463,9 @@ def main() -> None:
     finally:
         SOURCE_CALLBACK = False
         SOURCE_SWEEP = False
+        SOURCE_VIEW.clear()
+        SOURCE_PREFLIGHT.clear()
+        SOURCE_RUN_LISTS.clear()
 
 
 def advance_after_publication(published: set[str]) -> None:

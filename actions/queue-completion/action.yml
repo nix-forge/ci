@@ -15,15 +15,15 @@ runs:
         DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         SOURCE_ACTIVITY: ${{ inputs.source-activity }}
       run: |
-        args=(-f source_run_id="$GITHUB_RUN_ID")
+        args=(-f ref="$DEFAULT_BRANCH" -f "inputs[source_run_id]=$GITHUB_RUN_ID")
         case "$SOURCE_ACTIVITY" in
           '') ;;
           in_progress|completed)
-            args+=(-f source_run_attempt="$GITHUB_RUN_ATTEMPT" -f source_activity="$SOURCE_ACTIVITY") ;;
+            args+=(-f "inputs[source_run_attempt]=$GITHUB_RUN_ATTEMPT" -f "inputs[source_activity]=$SOURCE_ACTIVITY") ;;
           *) echo '::error::Invalid package-source notification phase'; exit 1 ;;
         esac
         for attempt in 1 2 3; do
-          if gh workflow run reconcile-merge-queue.yml --ref "$DEFAULT_BRANCH" "${args[@]}"; then
+          if gh api "repos/$GH_REPO/actions/workflows/reconcile-merge-queue.yml/dispatches" --method POST "${args[@]}"; then
             exit 0
           fi
           echo "::warning::Queue completion notification attempt $attempt failed"

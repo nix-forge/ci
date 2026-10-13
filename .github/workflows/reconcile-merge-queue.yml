@@ -23,7 +23,7 @@ jobs:
       github.event_name != 'workflow_run' ||
       contains(fromJSON('["pull_request", "merge_group"]'), github.event.workflow_run.event)
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     permissions:
       checks: read # Read validation evidence for the queued commit.
       actions: write # Dispatch trusted queue validation.
