@@ -431,6 +431,10 @@ def wait_for_source_run(run_id: str) -> None:
     print(f"Source run {run_id} is still running; reconcile other ready entries")
 
 
+class ObsoleteSourceNotification(RuntimeError):
+    """A verified producer callback no longer describes current source work."""
+
+
 def source_notification(
     run_id: str, attempt: str, activity: str
 ) -> tuple[str, str] | None:
@@ -442,6 +446,7 @@ def source_notification(
     Raises:
         ValueError: Source notification metadata is missing, tampered or stale.
         TypeError: Producer workflow path is not a string.
+        ObsoleteSourceNotification: A verified attempt or branch has advanced or vanished.
 
     """
     if not run_id or not SOURCE_CHECKS:
@@ -492,7 +497,7 @@ def source_notification(
             and isinstance(producer.get("head_sha"), str)
             and re.fullmatch(r"[0-9a-f]{40}", producer["head_sha"]) is not None
             and type(producer.get("run_attempt")) is int
-            and producer["run_attempt"] == int(attempt)
+            and producer["run_attempt"] > 0
             and producer.get("status")
             in {"queued", "in_progress", "completed", "waiting", "pending", "requested"}
         )
@@ -500,6 +505,19 @@ def source_notification(
     if not valid(run):
         raise ValueError("Source callback producer identity does not match")
     sha = run["head_sha"]
+    if run["run_attempt"] < int(attempt):
+        raise ValueError("Source callback names a future producer attempt")
+    if run["run_attempt"] > int(attempt):
+        original = api(f"repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}")
+        if (
+            not valid(original)
+            or original["run_attempt"] != int(attempt)
+            or original["head_sha"] != sha
+        ):
+            raise ValueError(
+                "Older source callback does not match its immutable producer"
+            )
+        raise ObsoleteSourceNotification("Producer has a newer validated attempt")
     if activity == "completed":
         wait_for_source_run(run_id)
         run = api(f"repos/{REPOSITORY}/actions/runs/{run_id}")
@@ -507,9 +525,28 @@ def source_notification(
             raise ValueError(
                 "Source callback producer changed while awaiting completion"
             )
-    ref = api(f"repos/{REPOSITORY}/git/ref/heads/{quote(branch, safe='/')}")
-    if ref.get("object", {}).get("sha") != sha:
-        raise ValueError("Source callback branch advanced beyond its producer")
+        if run["run_attempt"] > int(attempt):
+            raise ObsoleteSourceNotification(
+                "Producer attempt advanced during completion wait"
+            )
+        if run["run_attempt"] != int(attempt):
+            raise ValueError("Source callback producer attempt moved backwards")
+    try:
+        ref = api(f"repos/{REPOSITORY}/git/ref/heads/{quote(branch, safe='/')}")
+    except subprocess.CalledProcessError as error:
+        if "HTTP 404" not in (error.stderr or ""):
+            raise
+        raise ObsoleteSourceNotification(
+            "Verified source producer branch no longer exists"
+        ) from error
+    current_sha = ref.get("object", {}).get("sha")
+    if (
+        not isinstance(current_sha, str)
+        or re.fullmatch(r"[0-9a-f]{40}", current_sha) is None
+    ):
+        raise ValueError("Source producer branch has invalid current metadata")
+    if current_sha != sha:
+        raise ObsoleteSourceNotification("Verified source producer branch advanced")
     # A delayed start callback must not invalidate an already completed attempt.
     return sha, "completed" if run["status"] == "completed" else "in_progress"
 
@@ -919,11 +956,15 @@ def main() -> None:
     SOURCE_CACHE.clear()
     SOURCE_EVIDENCE.clear()
     run_id = os.environ.get("SOURCE_RUN_ID", "")
-    notification = source_notification(
-        run_id,
-        os.environ.get("SOURCE_RUN_ATTEMPT", ""),
-        os.environ.get("SOURCE_NOTIFICATION_ACTIVITY", ""),
-    )
+    try:
+        notification = source_notification(
+            run_id,
+            os.environ.get("SOURCE_RUN_ATTEMPT", ""),
+            os.environ.get("SOURCE_NOTIFICATION_ACTIVITY", ""),
+        )
+    except ObsoleteSourceNotification as error:
+        print(f"::warning::Ignoring obsolete verified source callback: {error}")
+        return
     if notification is None:
         wait_for_source_run(run_id)
     else:
@@ -988,7 +1029,9 @@ def advance_after_publication(published: set[str]) -> None:
     """Wait once for GitHub's asynchronous merge to expose its next live front."""
     for attempt in range(12):
         front = front_queue_entry()
-        head = front.get("headCommit") if front else None
+        if front is None:
+            return
+        head = front.get("headCommit")
         if head and head.get("oid") not in published:
             refs = api(
                 f"repos/{REPOSITORY}/git/matching-refs/{QUEUE_PREFIX.removeprefix('refs/')}"

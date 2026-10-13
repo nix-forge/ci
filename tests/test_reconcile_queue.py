@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import importlib.util
+import io
 import os
 import subprocess
 import unittest
@@ -1533,7 +1535,7 @@ class SourceNotificationTests(unittest.TestCase):
 
         with (
             patch.object(queue, "wait_for_source_run", side_effect=rerun),
-            self.assertRaises(ValueError),
+            self.assertRaises(queue.ObsoleteSourceNotification),
         ):
             self.notification("completed")
         self.assertEqual(self.fixture.writes, [])
@@ -1547,7 +1549,6 @@ class SourceNotificationTests(unittest.TestCase):
             {"event": "push"},
             {"head_sha": "not-a-sha"},
             {"head_branch": "automation/package-updates-../other"},
-            {"run_attempt": 2},
             {"workflow_id": True},
         ]
         for change in updates:
@@ -1568,10 +1569,107 @@ class SourceNotificationTests(unittest.TestCase):
             ):
                 self.notification(activity, attempt)
 
-    def test_current_branch_must_still_name_producer_head(self) -> None:
+    def test_current_branch_advance_is_obsolete_after_validation(self) -> None:
         self.fixture.head = "d" * 40
+        with self.assertRaises(queue.ObsoleteSourceNotification):
+            self.notification("in_progress")
+
+    def test_future_attempt_is_a_real_metadata_error(self) -> None:
+        with self.assertRaises(ValueError):
+            self.notification("in_progress", "2")
+
+    def test_head_mutation_during_wait_is_a_real_error(self) -> None:
+        def mutate(_run_id: str) -> None:
+            self.run["head_sha"] = "e" * 40
+
+        with (
+            patch.object(queue, "wait_for_source_run", side_effect=mutate),
+            self.assertRaises(ValueError),
+        ):
+            self.notification("completed")
+
+    def test_obsolete_callbacks_main_is_noop_before_any_admission(self) -> None:
+        original = self.run.copy()
+        for reason in ("old_attempt", "advanced", "deleted"):
+            with self.subTest(reason=reason):
+                self.run.clear()
+                self.run.update(original)
+                self.fixture.head = self.fixture.sha
+                if reason == "old_attempt":
+                    self.run["run_attempt"] = 2
+                if reason == "advanced":
+                    self.fixture.head = "d" * 40
+
+                def api(
+                    path: str,
+                    method: str = "GET",
+                    data: object = None,
+                    *,
+                    obsolete_reason: str = reason,
+                ) -> Any:
+                    if "/attempts/" in path:
+                        return original
+                    if (
+                        obsolete_reason == "deleted"
+                        and self.fixture.branch in path
+                        and "/git/ref/" in path
+                    ):
+                        raise subprocess.CalledProcessError(
+                            1, ["gh", "api", path], stderr="HTTP 404: Not Found"
+                        )
+                    return self.fixture._api(path, method, data)
+
+                output = io.StringIO()
+                with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "SOURCE_RUN_ID": self.run_id,
+                            "SOURCE_RUN_ATTEMPT": "1",
+                            "SOURCE_NOTIFICATION_ACTIVITY": "in_progress",
+                        },
+                    ),
+                    patch.object(queue, "api", side_effect=api),
+                    patch.object(queue, "SOURCE_CHECKS", self.fixture.checks),
+                    patch.object(queue, "WORKFLOWS", list(self.fixture.checks)),
+                    patch.object(queue, "SOURCE_CACHE", {}),
+                    patch.object(queue, "SOURCE_EVIDENCE", {}),
+                    patch.object(queue, "admit") as admit,
+                    patch.object(queue, "dispatch_entry") as dispatch,
+                    patch.object(queue, "graphql") as graphql,
+                    contextlib.redirect_stdout(output),
+                ):
+                    queue.main()
+                self.assertIn(
+                    "Ignoring obsolete verified source callback", output.getvalue()
+                )
+                self.assertEqual(self.fixture.writes, [])
+                admit.assert_not_called()
+                dispatch.assert_not_called()
+                graphql.assert_not_called()
+
+    def test_tampered_old_producer_is_not_obsolete(self) -> None:
+        self.run.update(run_attempt=2, repository={"full_name": "other/repository"})
         with self.assertRaises(ValueError):
             self.notification("in_progress")
+
+    def test_invalid_immutable_old_attempt_is_not_obsolete(self) -> None:
+        self.run["run_attempt"] = 2
+        old = {**self.run, "run_attempt": 1, "head_sha": "e" * 40}
+
+        def api(path: str, method: str = "GET", data: object = None) -> Any:
+            return (
+                old if "/attempts/" in path else self.fixture._api(path, method, data)
+            )
+
+        with (
+            patch.object(queue, "api", side_effect=api),
+            patch.object(queue, "SOURCE_CHECKS", self.fixture.checks),
+            patch.object(queue, "WORKFLOWS", list(self.fixture.checks)),
+            patch.object(queue, "SOURCE_CACHE", {}),
+            self.assertRaises(ValueError),
+        ):
+            queue.source_notification(self.run_id, "1", "in_progress")
 
     def test_legacy_queue_callback_keeps_original_contract(self) -> None:
         self.run["head_branch"] = "gh-readonly-queue/main/pr-7-example"
@@ -1699,6 +1797,22 @@ class QueueAdvanceTests(unittest.TestCase):
         self.assertEqual(sleep.call_count, 3)
         dispatch.assert_called_once_with(self.next)
         api.assert_called_once()
+
+    def test_empty_queue_returns_without_sleep_or_warning(self) -> None:
+        output = io.StringIO()
+        with (
+            patch.object(queue, "front_queue_entry", return_value=None) as front,
+            patch.object(queue, "api") as api,
+            patch.object(queue, "dispatch_entry") as dispatch,
+            patch.object(queue.time, "sleep") as sleep,
+            contextlib.redirect_stdout(output),
+        ):
+            queue.advance_after_publication({"passed"})
+        front.assert_called_once()
+        sleep.assert_not_called()
+        api.assert_not_called()
+        dispatch.assert_not_called()
+        self.assertEqual(output.getvalue(), "")
 
     def test_reused_old_head_never_dispatches_again(self) -> None:
         with (

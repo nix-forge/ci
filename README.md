@@ -120,12 +120,15 @@ path, branch, head and attempt before using its metadata. Start notifications
 invalidate previous mirrored jobs and admission without waiting for builds;
 completion notifications wait briefly for their own producer to finish and
 revalidate its actual attempt. A delayed start for a completed attempt reads
-the completed results. An already queued source PR cannot bypass this check.
+the completed results. Verified obsolete attempts or advanced/deleted producer
+branches stop without any status or queue writes; tampered identities and future
+attempts remain errors. An already queued source PR cannot bypass this check.
 Statuses never replace the required native jobs or relax branch protection.
 After publishing new complete queue success, reconciliation waits at most 55
 seconds for GitHub's asynchronous merge to expose a different live front ref.
 It verifies that ref and dispatches its missing validation through the existing
-handler once. Running or failed candidates do not start this additional poll;
+handler once. An empty queue returns immediately without a warning. Running or
+failed candidates do not start this additional poll;
 there is no recursive recovery dispatch.
 
 The actions read the default branch from GitHub's repository event metadata.
