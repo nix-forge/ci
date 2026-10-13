@@ -98,6 +98,28 @@ def admit(pr: dict[str, Any]) -> bool:
             )["node"]
             return bool(state["mergeQueueEntry"])
         if not reconcile_source(pr, source_statuses):
+            if SOURCE_HEAD == sha and any(
+                status["context"] == ADMISSION and status.get("state") == "success"
+                for status in source_statuses.values()
+            ):
+                fresh = api(f"repos/{REPOSITORY}/pulls/{pr['number']}")
+                current = api(
+                    f"repos/{REPOSITORY}/git/ref/heads/{quote(pr['head']['ref'], safe='/')}"
+                )
+                if (
+                    source_identity(fresh)
+                    and fresh["head"]["sha"] == sha
+                    and current["object"]["sha"] == sha
+                ):
+                    api(
+                        f"repos/{REPOSITORY}/statuses/{sha}",
+                        "POST",
+                        {
+                            "state": "pending",
+                            "context": ADMISSION,
+                            "description": "Source validation changed; current successful jobs required",
+                        },
+                    )
             return False
     trusted = (
         source
@@ -138,6 +160,26 @@ def admit(pr: dict[str, Any]) -> bool:
         id=pr["node_id"],
     )["node"]
     if state["mergeQueueEntry"]:
+        if (
+            source
+            and SOURCE_HEAD == sha
+            and any(
+                status["context"] == ADMISSION and status.get("state") != "success"
+                for status in (source_statuses or {}).values()
+            )
+        ):
+            if not source_runs_current(pr) or source_contract(pr) is None:
+                reconcile_source(pr, allow_success=False)
+                return False
+            api(
+                f"repos/{REPOSITORY}/statuses/{sha}",
+                "POST",
+                {
+                    "state": "success",
+                    "context": ADMISSION,
+                    "description": "This PR head remains queued with current successful source jobs",
+                },
+            )
         return True
     # Once admitted, a rejected head needs a fix or deliberate requeue.
     # Never keep rebuilding the same failing merge group indefinitely.
@@ -387,6 +429,126 @@ def wait_for_source_run(run_id: str) -> None:
             return
         time.sleep(5)
     print(f"Source run {run_id} is still running; reconcile other ready entries")
+
+
+class ObsoleteSourceNotification(RuntimeError):
+    """A verified producer callback no longer describes current source work."""
+
+
+def source_notification(
+    run_id: str, attempt: str, activity: str
+) -> tuple[str, str] | None:
+    """Bind an explicit source callback to its real current producer identity.
+
+    Returns:
+        Exact producer head and current activity, or None for legacy queue callbacks.
+
+    Raises:
+        ValueError: Source notification metadata is missing, tampered or stale.
+        TypeError: Producer workflow path is not a string.
+        ObsoleteSourceNotification: A verified attempt or branch has advanced or vanished.
+
+    """
+    if not run_id or not SOURCE_CHECKS:
+        return None
+    if not run_id.isascii() or not run_id.isdecimal() or int(run_id) <= 0:
+        raise ValueError("Source run ID must be a positive ASCII integer")
+    run = api(f"repos/{REPOSITORY}/actions/runs/{run_id}")
+    branch = run.get("head_branch", "")
+    if not isinstance(branch, str) or not branch.startswith(
+        "automation/package-updates-"
+    ):
+        if activity or attempt:
+            raise ValueError(
+                "Explicit source callback requires a package updater branch"
+            )
+        return None
+    if (
+        activity not in {"in_progress", "completed"}
+        or not attempt.isascii()
+        or not attempt.isdecimal()
+        or int(attempt) <= 0
+        or re.fullmatch(r"automation/package-updates-[a-z0-9][a-z0-9+._-]*", branch)
+        is None
+    ):
+        raise ValueError("Invalid source callback activity, attempt or branch")
+    path = run.get("path", "")
+    if not isinstance(path, str):
+        raise TypeError("Source callback workflow path is invalid")
+    workflow = path.removeprefix(".github/workflows/")
+    if workflow not in WORKFLOWS or workflow not in SOURCE_CHECKS:
+        raise ValueError("Source callback workflow is outside the required contract")
+    metadata = source_read(f"repos/{REPOSITORY}/actions/workflows/{workflow}")
+
+    def valid(producer: dict[str, Any]) -> bool:
+        return (
+            type(producer.get("id")) is int
+            and producer["id"] == int(run_id)
+            and type(producer.get("workflow_id")) is int
+            and type(metadata.get("id")) is int
+            and producer["workflow_id"] == metadata.get("id")
+            and metadata.get("state") == "active"
+            and metadata.get("path") == f".github/workflows/{workflow}"
+            and producer.get("path") == metadata.get("path")
+            and producer.get("repository", {}).get("full_name") == REPOSITORY
+            and producer.get("head_repository", {}).get("full_name") == REPOSITORY
+            and producer.get("event") == "workflow_dispatch"
+            and producer.get("head_branch") == branch
+            and isinstance(producer.get("head_sha"), str)
+            and re.fullmatch(r"[0-9a-f]{40}", producer["head_sha"]) is not None
+            and type(producer.get("run_attempt")) is int
+            and producer["run_attempt"] > 0
+            and producer.get("status")
+            in {"queued", "in_progress", "completed", "waiting", "pending", "requested"}
+        )
+
+    if not valid(run):
+        raise ValueError("Source callback producer identity does not match")
+    sha = run["head_sha"]
+    if run["run_attempt"] < int(attempt):
+        raise ValueError("Source callback names a future producer attempt")
+    if run["run_attempt"] > int(attempt):
+        original = api(f"repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}")
+        if (
+            not valid(original)
+            or original["run_attempt"] != int(attempt)
+            or original["head_sha"] != sha
+        ):
+            raise ValueError(
+                "Older source callback does not match its immutable producer"
+            )
+        raise ObsoleteSourceNotification("Producer has a newer validated attempt")
+    if activity == "completed":
+        wait_for_source_run(run_id)
+        run = api(f"repos/{REPOSITORY}/actions/runs/{run_id}")
+        if not valid(run) or run["head_sha"] != sha:
+            raise ValueError(
+                "Source callback producer changed while awaiting completion"
+            )
+        if run["run_attempt"] > int(attempt):
+            raise ObsoleteSourceNotification(
+                "Producer attempt advanced during completion wait"
+            )
+        if run["run_attempt"] != int(attempt):
+            raise ValueError("Source callback producer attempt moved backwards")
+    try:
+        ref = api(f"repos/{REPOSITORY}/git/ref/heads/{quote(branch, safe='/')}")
+    except subprocess.CalledProcessError as error:
+        if "HTTP 404" not in (error.stderr or ""):
+            raise
+        raise ObsoleteSourceNotification(
+            "Verified source producer branch no longer exists"
+        ) from error
+    current_sha = ref.get("object", {}).get("sha")
+    if (
+        not isinstance(current_sha, str)
+        or re.fullmatch(r"[0-9a-f]{40}", current_sha) is None
+    ):
+        raise ValueError("Source producer branch has invalid current metadata")
+    if current_sha != sha:
+        raise ObsoleteSourceNotification("Verified source producer branch advanced")
+    # A delayed start callback must not invalidate an already completed attempt.
+    return sha, "completed" if run["status"] == "completed" else "in_progress"
 
 
 def front_queue_entry() -> dict[str, Any] | None:
@@ -790,9 +952,23 @@ def main() -> None:
         subprocess.CalledProcessError: An API error other than a deleted ref occurred.
 
     """
+    global SOURCE_HEAD, SOURCE_ACTIVITY
     SOURCE_CACHE.clear()
     SOURCE_EVIDENCE.clear()
-    wait_for_source_run(os.environ.get("SOURCE_RUN_ID", ""))
+    run_id = os.environ.get("SOURCE_RUN_ID", "")
+    try:
+        notification = source_notification(
+            run_id,
+            os.environ.get("SOURCE_RUN_ATTEMPT", ""),
+            os.environ.get("SOURCE_NOTIFICATION_ACTIVITY", ""),
+        )
+    except ObsoleteSourceNotification as error:
+        print(f"::warning::Ignoring obsolete verified source callback: {error}")
+        return
+    if notification is None:
+        wait_for_source_run(run_id)
+    else:
+        SOURCE_HEAD, SOURCE_ACTIVITY = notification
 
     # Pagination is bounded by GitHub's repository PR limit, not a waiting loop.
     queue_expected = False
@@ -835,21 +1011,62 @@ def main() -> None:
             )
             break
         time.sleep(5)
+    published_passes = set()
     for entry in refs:
         try:
-            dispatch_entry(entry)
+            if dispatch_entry(entry):
+                published_passes.add(entry["object"]["sha"])
         except subprocess.CalledProcessError as error:  # ruff: ignore[try-except-in-loop]
             # Each ref can disappear independently while GitHub advances the queue.
             if "HTTP 404" not in (error.stderr or ""):
                 raise
             print(f"Queue ref disappeared: {entry['ref']}")
+    if published_passes:
+        advance_after_publication(published_passes)
 
 
-def dispatch_entry(entry: dict[str, Any]) -> None:
-    """Start missing workflows for one queue ref if it still exists."""
+def advance_after_publication(published: set[str]) -> None:
+    """Wait once for GitHub's asynchronous merge to expose its next live front."""
+    for attempt in range(12):
+        front = front_queue_entry()
+        if front is None:
+            return
+        head = front.get("headCommit")
+        if head and head.get("oid") not in published:
+            refs = api(
+                f"repos/{REPOSITORY}/git/matching-refs/{QUEUE_PREFIX.removeprefix('refs/')}"
+            )
+            matching = [
+                entry
+                for entry in refs
+                if entry["ref"].startswith(QUEUE_PREFIX)
+                and entry["object"]["sha"] == head["oid"]
+            ]
+            if len(matching) == 1:
+                try:
+                    dispatch_entry(matching[0])
+                except subprocess.CalledProcessError as error:
+                    if "HTTP 404" not in (error.stderr or ""):
+                        raise
+                    print("Next queue ref disappeared before validation dispatch")
+                return
+        if attempt < 11:
+            time.sleep(5)
+    print(
+        "::warning::No new verified front ref after publishing success; recovery discovery is bounded"
+    )
+
+
+def dispatch_entry(entry: dict[str, Any]) -> bool:
+    """Start missing queue workflows and report whether success was published.
+
+    Returns:
+        Whether fresh passing results justify one bounded next-front discovery.
+
+    """
     ref, sha = entry["ref"], entry["object"]["sha"]
     if not ref.startswith(QUEUE_PREFIX):
-        return
+        return False
     base = api(f"repos/{REPOSITORY}/git/commits/{sha}")["parents"][0]["sha"]
     validation_runs: list[dict[str, Any]] = []
     for workflow in WORKFLOWS:
@@ -877,7 +1094,7 @@ def dispatch_entry(entry: dict[str, Any]) -> None:
             payload,
         )
         print(f"Dispatched {workflow} for {sha}")
-    publish_dispatch_results(ref, sha, validation_runs)
+    return publish_dispatch_results(ref, sha, validation_runs)
 
 
 def read_statuses(sha: str) -> dict[str, Any]:
@@ -973,11 +1190,16 @@ def invalidate_results(
             )
 
 
-def publish_dispatch_results(ref: str, sha: str, runs: list[dict[str, Any]]) -> None:
-    """Expose verified dispatch results to the merge queue's status evaluator."""
+def publish_dispatch_results(ref: str, sha: str, runs: list[dict[str, Any]]) -> bool:
+    """Expose verified dispatch results and identify newly published complete passes.
+
+    Returns:
+        Whether new actual success results may let GitHub advance the live queue.
+
+    """
     dispatched = [run for run in runs if run["event"] == "workflow_dispatch"]
     if not dispatched:
-        return
+        return False
     latest = read_statuses(sha)
     all_passed = workflow_set_passed(sha, runs)
     failures = {"failure", "timed_out", "cancelled"}
@@ -997,7 +1219,7 @@ def publish_dispatch_results(ref: str, sha: str, runs: list[dict[str, Any]]) -> 
     jobs = latest_dispatch_jobs(sha, evidence) if evidence else None
     if not jobs:
         invalidate_results(ref, sha, latest)
-        return
+        return False
     results = {
         job["name"]: "success" if job["conclusion"] == "success" else "failure"
         for job in jobs
@@ -1005,10 +1227,11 @@ def publish_dispatch_results(ref: str, sha: str, runs: list[dict[str, Any]]) -> 
         or (all_passed and job["conclusion"] == "success")
     }
     invalidate_results(ref, sha, latest, set(results))
+    published_success = False
     for job in jobs:
         # Skipped and neutral jobs provide no passing or failing evidence.
         if job["name"] in results:
-            publish_status(
+            changed = publish_status(
                 ref,
                 sha,
                 latest,
@@ -1018,6 +1241,14 @@ def publish_dispatch_results(ref: str, sha: str, runs: list[dict[str, Any]]) -> 
                     "target_url": job["html_url"],
                 },
             )
+            published_success |= changed and results[job["name"]] == "success"
+    source_required = {name for names in SOURCE_CHECKS.values() for name in names}
+    return (
+        published_success
+        and all_passed
+        and all(state == "success" for state in results.values())
+        and source_required.issubset(results)
+    )
 
 
 def publish_status(
@@ -1025,15 +1256,20 @@ def publish_status(
     sha: str,
     latest: dict[str, Any],
     result: dict[str, str],
-) -> None:
-    """Publish one actual job result once, while its queue ref still matches."""
+) -> bool:
+    """Publish one actual job result once, while its queue ref still matches.
+
+    Returns:
+        Whether this exact current queue commit received a new result.
+
+    """
     name, state, target_url = result["context"], result["state"], result["target_url"]
     previous = latest.get(name, {})
     if previous.get("state") == state and previous.get("target_url") == target_url:
-        return
+        return False
     current = api(f"repos/{REPOSITORY}/git/ref/{ref.removeprefix('refs/')}")
     if current["object"]["sha"] != sha:
-        return
+        return False
     api(
         f"repos/{REPOSITORY}/statuses/{sha}",
         "POST",
@@ -1047,6 +1283,7 @@ def publish_status(
         },
     )
     print(f"Reported {name}: {state} for {sha}")
+    return True
 
 
 if __name__ == "__main__":
