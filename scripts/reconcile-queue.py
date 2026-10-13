@@ -1587,6 +1587,13 @@ def queue_run_inventory(ref: str, sha: str) -> dict[str, Any]:
         for run in SOURCE_RUN_LISTS[sha]["workflow_runs"]:
             if run.get("workflow_id") != metadata["id"]:
                 continue
+            # After a normal merge, the same commit can have a main-push run
+            # while its old queue ref still exists. That run is not evidence
+            # for this candidate; keep inspecting its own queue producers.
+            if run.get("event") not in {"merge_group", "workflow_dispatch"} or run.get(
+                "head_branch"
+            ) != ref.removeprefix("refs/heads/"):
+                continue
             if not (
                 run.get("path") == metadata["path"]
                 and run.get("head_sha") == sha

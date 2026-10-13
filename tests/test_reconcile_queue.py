@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import copy
 import importlib.util
 import io
 import os
@@ -2644,14 +2645,142 @@ class SourceQueueBatchTests(unittest.TestCase):
                 self.assertFalse(self.report())
                 self.assertEqual(self.fixture.writes, [])
 
+    def test_same_sha_main_push_does_not_replace_real_queue_codeql_evidence(
+        self,
+    ) -> None:
+        run = self.fixture.runs["codeql.yml"][0]
+        main_push = {
+            **run,
+            "id": run["id"] + 1000,
+            "event": "push",
+            "head_branch": "main",
+        }
+        self.fixture.runs["codeql.yml"].insert(0, main_push)
+        self.assertTrue(self.report())
+        links = [data["target_url"] for _path, data in self.fixture.writes]
+        self.assertEqual(len(links), 19)
+        self.assertTrue(all(f"/runs/{main_push['id']}/" not in link for link in links))
+
+    def test_lingering_refs_with_main_pushes_do_not_block_new_live_front_dispatch(
+        self,
+    ) -> None:
+        old = self.fixture
+        older = copy.deepcopy(old)
+        older.sha = "c" * 40
+        older.head = older.sha
+        older.branch = "gh-readonly-queue/main/older"
+        new_jobs = {}
+        for runs in older.runs.values():
+            run = runs[0]
+            jobs = older.jobs[run["id"]]
+            run.update(
+                id=run["id"] + 1000, head_sha=older.sha, head_branch=older.branch
+            )
+            for job in jobs:
+                job.update(id=job["id"] + 100000, run_id=run["id"], head_sha=older.sha)
+                job["html_url"] = (
+                    f"https://github.com/{queue.REPOSITORY}/actions/runs/{run['id']}/job/{job['id']}"
+                )
+            new_jobs[run["id"]] = jobs
+        older.jobs = new_jobs
+        for fixture in (old, older):
+            run = fixture.runs["codeql.yml"][0]
+            fixture.runs["codeql.yml"].insert(
+                0,
+                {
+                    **run,
+                    "id": run["id"] + 10000,
+                    "event": "push",
+                    "head_branch": "main",
+                },
+            )
+            fixture.statuses = [
+                {
+                    "context": job["name"],
+                    "state": "success",
+                    "target_url": job["html_url"],
+                    "description": "Mirrored queue job result",
+                }
+                for jobs in fixture.jobs.values()
+                for job in jobs
+            ]
+        new_sha = "d" * 40
+        new_ref = queue.QUEUE_PREFIX + "next"
+        refs = [
+            {"ref": "refs/heads/" + fixture.branch, "object": {"sha": fixture.sha}}
+            for fixture in (old, older)
+        ] + [{"ref": new_ref, "object": {"sha": new_sha}}]
+        dispatched = []
+
+        def api(path: str, method: str = "GET", data: object = None) -> Any:
+            if method == "POST":
+                self.assertTrue(path.endswith("/dispatches"))
+                dispatched.append(data)
+                return None
+            if "/git/matching-refs/" in path:
+                return refs
+            if "head_sha=" + new_sha in path:
+                return {"total_count": 0, "workflow_runs": []}
+            if "/git/commits/" in path:
+                return {"parents": [{"sha": old.base}]}
+            if path.endswith(new_ref.removeprefix("refs/")):
+                return {"object": {"sha": new_sha}}
+            if (
+                older.sha in path
+                or older.branch in path
+                or any(f"/runs/{run_id}/" in path for run_id in older.jobs)
+            ):
+                return older._api(path, method, data)
+            return old._api(path, method, data)
+
+        response = {
+            "repository": {
+                "pullRequests": {"pageInfo": {"hasNextPage": False}, "nodes": []}
+            }
+        }
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "SOURCE_RUN_ID": str(self.runs[1]["id"]),
+                    "SOURCE_RUN_ATTEMPT": "",
+                    "SOURCE_NOTIFICATION_ACTIVITY": "",
+                },
+            ),
+            patch.object(queue, "api", side_effect=api),
+            patch.object(queue, "graphql", return_value=response),
+            patch.object(queue, "SOURCE_CHECKS", old.checks),
+            patch.object(queue, "WORKFLOWS", list(old.checks)),
+            patch.object(queue, "SOURCE_HEAD", ""),
+            patch.object(queue, "SOURCE_ACTIVITY", ""),
+        ):
+            queue.main()
+        self.assertEqual(len(dispatched), 5)
+        self.assertEqual(
+            {data["ref"] for data in dispatched}, {new_ref.removeprefix("refs/heads/")}
+        )
+        self.assertEqual(old.writes + older.writes, [])
+
+    def test_nonqueue_branch_producer_is_not_candidate_evidence(self) -> None:
+        self.fixture.runs["ci.yml"][0]["head_branch"] = "main"
+        with (
+            patch.object(queue, "api", side_effect=self.fixture._api),
+            patch.object(queue, "SOURCE_CHECKS", self.fixture.checks),
+            patch.object(queue, "WORKFLOWS", list(self.fixture.checks)),
+            patch.object(queue, "SOURCE_CACHE", {}),
+        ):
+            self.assertNotIn(
+                "ci.yml", queue.queue_run_inventory(self.ref, self.fixture.sha)
+            )
+
     def test_aggregate_rejects_tampered_path_branch_repository_and_truncated_inventory(
         self,
     ) -> None:
         for field, value in (
             ("path", ".github/workflows/wrong.yml"),
-            ("head_branch", "untrusted"),
             ("repository", {"full_name": "other/repo"}),
             ("head_repository", {"full_name": "other/repo"}),
+            ("run_attempt", 0),
         ):
             self.setUp()
             self.fixture.runs["ci.yml"][0][field] = value
