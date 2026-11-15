@@ -108,6 +108,20 @@ class FlakeCheckSelectionTests(unittest.TestCase):
         self.assertFalse(selected[0] & selected[2])
         self.assertFalse(selected[1] & selected[2])
 
+    @mock.patch.object(FLAKE_CHECKS, "check_derivation")
+    @mock.patch.object(FLAKE_CHECKS, "resolve_base_source")
+    @mock.patch.object(FLAKE_CHECKS.subprocess, "run")
+    @mock.patch.object(FLAKE_CHECKS.subprocess, "check_output")
+    def test_unvalidated_base_cannot_suppress_an_unchanged_failing_check(
+        self, names, build, resolve, derivation
+    ):
+        names.return_value = '["unchanged"]'
+        derivation.return_value = "/nix/store/" + "0" * 32 + "-unchanged.drv"
+        build.return_value.returncode = 1
+        self.assertEqual(FLAKE_CHECKS.run("x86_64-linux", base_revision="a" * 40), 1)
+        resolve.assert_not_called()
+        self.assertEqual(build.call_count, 1)
+
     def test_rejects_empty_partition(self):
         with (
             mock.patch.object(
@@ -137,7 +151,9 @@ class FlakeCheckSelectionTests(unittest.TestCase):
         check_derivation.side_effect = derivation
         run_command.return_value.returncode = 0
 
-        result = FLAKE_CHECKS.run("x86_64-linux", base_revision="a" * 40)
+        result = FLAKE_CHECKS.run(
+            "x86_64-linux", base_revision="a" * 40, base_validated=True
+        )
 
         self.assertEqual(result, 0)
         build_calls = [
@@ -163,7 +179,9 @@ class FlakeCheckSelectionTests(unittest.TestCase):
         ]
         run_command.return_value.returncode = 0
 
-        result = FLAKE_CHECKS.run("x86_64-linux", base_revision="a" * 40)
+        result = FLAKE_CHECKS.run(
+            "x86_64-linux", base_revision="a" * 40, base_validated=True
+        )
 
         self.assertEqual(result, 0)
         self.assertTrue(
@@ -188,7 +206,9 @@ class FlakeCheckSelectionTests(unittest.TestCase):
         ]
         run_command.return_value.returncode = 0
 
-        result = FLAKE_CHECKS.run("x86_64-linux", base_revision="a" * 40)
+        result = FLAKE_CHECKS.run(
+            "x86_64-linux", base_revision="a" * 40, base_validated=True
+        )
 
         self.assertEqual(result, 0)
         self.assertEqual(check_derivation.call_args_list[1].kwargs["timeout"], 60)
@@ -233,6 +253,109 @@ class FlakeCheckSelectionTests(unittest.TestCase):
         ]
 
         self.assertIsNone(FLAKE_CHECKS.resolve_base_source("a" * 40))
+
+
+class BatchSelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.drv = "/nix/store/" + "0" * 32 + "-"
+
+    @mock.patch.object(FLAKE_CHECKS.subprocess, "check_output")
+    def test_batch_validates_complete_output_and_timeout(self, output):
+        import json
+
+        output.return_value = json.dumps({"one": self.drv + "one.drv", "missing": None})
+        result = FLAKE_CHECKS.check_derivations(
+            "x86_64-linux", ["one", "missing"], timeout=30
+        )
+        self.assertIsNone(result["missing"])
+        self.assertEqual(output.call_args.kwargs["timeout"], 30)
+        for malformed in ["{}", "[]", '{"one": 3, "missing": null}']:
+            output.return_value = malformed
+            with self.assertRaises(ValueError):
+                FLAKE_CHECKS.check_derivations("x86_64-linux", ["one", "missing"])
+
+    def _run(self, head, base, *, source="base", roots=None):
+        with (
+            mock.patch.object(
+                FLAKE_CHECKS.subprocess,
+                "check_output",
+                return_value='["changed","new","same"]',
+            ),
+            mock.patch.object(FLAKE_CHECKS, "resolve_base_source", return_value=source),
+            mock.patch.object(
+                FLAKE_CHECKS,
+                "check_derivations",
+                side_effect=[head, base] if source else [head],
+            ) as batch,
+            mock.patch.object(
+                FLAKE_CHECKS,
+                "check_derivation",
+                side_effect=lambda _system, name, **_kw: self.drv + name + ".drv",
+            ) as isolated,
+            mock.patch.object(
+                FLAKE_CHECKS.subprocess, "run", return_value=mock.Mock(returncode=0)
+            ) as command,
+        ):
+            result = FLAKE_CHECKS.run(
+                "x86_64-linux",
+                eval_batch_size=4,
+                cache_roots=roots,
+                base_validated=True,
+            )
+        return result, batch, isolated, command
+
+    def test_changed_and_new_build_but_unchanged_skips_in_two_evaluations(self):
+        head = {n: self.drv + n + ".drv" for n in ["changed", "new", "same"]}
+        base = {"changed": self.drv + "old.drv", "new": None, "same": head["same"]}
+        result, batch, isolated, command = self._run(head, base)
+        self.assertEqual(result, 0)
+        self.assertEqual(batch.call_count, 2)
+        isolated.assert_not_called()
+        self.assertEqual(
+            [c.args[0][-1] for c in command.call_args_list],
+            [head[n] + "^*" for n in ["changed", "new"]],
+        )
+
+    def test_base_timeout_builds_all_without_per_check_retries(self):
+        head = {n: self.drv + n + ".drv" for n in ["changed", "new", "same"]}
+        result, batch, isolated, command = self._run(
+            head, subprocess.TimeoutExpired("nix", 60)
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(batch.call_count, 2)
+        isolated.assert_not_called()
+        self.assertEqual(command.call_count, 3)
+
+    def test_current_batch_failure_falls_back_to_isolated_current_checks(self):
+        result, _batch, isolated, command = self._run(
+            ValueError("batch invalid"), {}, source=None
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(isolated.call_count, 3)
+        self.assertEqual(command.call_count, 3)
+
+    def test_cache_roots_retain_successful_outputs_using_safe_names(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            head = {n: self.drv + n + ".drv" for n in ["changed", "new", "same"]}
+            result, _batch, _isolated, command = self._run(
+                head, {}, source=None, roots=Path(directory)
+            )
+            self.assertEqual(result, 0)
+            for call in command.call_args_list:
+                args = call.args[0]
+                self.assertNotIn("--no-link", args)
+                root = Path(args[args.index("--out-link") + 1])
+                self.assertEqual(root.parent, Path(directory))
+                self.assertRegex(root.name, r"^[0-9a-f]{64}$")
+
+    def test_rejects_unbounded_batches_and_relative_roots(self):
+        for size in [0, 9]:
+            with self.assertRaises(ValueError):
+                FLAKE_CHECKS.run("x86_64-linux", eval_batch_size=size)
+        with self.assertRaises(ValueError):
+            FLAKE_CHECKS.run("x86_64-linux", cache_roots=Path("relative"))
 
 
 if __name__ == "__main__":

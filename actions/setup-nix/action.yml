@@ -7,29 +7,73 @@ inputs:
   cache-scope:
     description: Separate jobs with different build targets.
     default: build
+  cache-write-mode:
+    description: auto preserves trusted push/dispatch writes; read-only never saves; seed requires the default branch.
+    default: auto
+  cache-partition:
+    description: Optional workload partition identity; seed and consumers must use the same value.
+    default: ''
+  cache-lockfiles:
+    description: Glob of relevant lockfiles used for the primary restore prefix.
+    default: '**/flake.lock'
+  cache-restore-compatible:
+    description: Opt in to an older lock's store within the same runtime/platform/workload; Nix still validates exact outputs.
+    default: 'false'
 outputs:
   cache-hit:
     description: Whether a matching store cache was restored.
     value: ${{ steps.cache.outputs.hit }}
+  cache-restored-key:
+    description: Actual matched store-cache key, including a compatible-prefix hit.
+    value: ${{ steps.cache.outputs.restored-key }}
+  cache-hit-primary:
+    description: Whether the exact primary key matched.
+    value: ${{ steps.cache.outputs.hit-primary-key }}
+  cache-key:
+    description: Exact primary store-cache identity.
+    value: ${{ steps.cache-policy.outputs.key }}
+  cache-save-eligible:
+    description: Whether the trusted-event policy allows this job to save a cache; not a save receipt.
+    value: ${{ steps.cache-policy.outputs.save }}
 runs:
   using: composite
   steps:
     - uses: DeterminateSystems/determinate-nix-action@16f94ba7aae399b9f9077c254b6719ec6de7e3e3 # v3.24.2
+    - name: Resolve cache policy and effective providers
+      id: cache-policy
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        CACHE_ENABLED: ${{ inputs.cache }}
+        CACHE_SCOPE: ${{ inputs.cache-scope }}
+        CACHE_PARTITION: ${{ inputs.cache-partition }}
+        CACHE_WRITE_MODE: ${{ inputs.cache-write-mode }}
+        CACHE_LOCK_HASH: ${{ hashFiles(inputs.cache-lockfiles) }}
+        CACHE_RESTORE_COMPATIBLE: ${{ inputs.cache-restore-compatible }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: python3 "$ACTION_PATH/../../scripts/nix_cache_policy.py"
     - name: Restore Nix store
       id: cache
       if: inputs.cache == 'true'
       uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
       with:
-        primary-key: nix-v1-${{ runner.os }}-${{ runner.arch }}-det-3.22.3-${{ inputs.cache-scope }}-${{ hashFiles('**/flake.lock') }}-${{ github.sha }}
-        restore-prefixes-first-match: nix-v1-${{ runner.os }}-${{ runner.arch }}-det-3.22.3-${{ inputs.cache-scope }}-${{ hashFiles('**/flake.lock') }}-
+        primary-key: ${{ steps.cache-policy.outputs.key }}
+        restore-prefixes-first-match: |
+          ${{ steps.cache-policy.outputs.restore-prefix }}
+          ${{ steps.cache-policy.outputs.compatible-prefix }}
         gc-max-store-size: 2G
         purge: false
-        save: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        save: ${{ steps.cache-policy.outputs.save }}
     - name: Record setup
       shell: bash
       env:
         CACHE_ENABLED: ${{ inputs.cache }}
         CACHE_HIT: ${{ steps.cache.outputs.hit }}
+        CACHE_KEY: ${{ steps.cache-policy.outputs.key }}
+        CACHE_RESTORED_KEY: ${{ steps.cache.outputs.restored-key }}
+        CACHE_HIT_PRIMARY: ${{ steps.cache.outputs.hit-primary-key }}
+        CACHE_SAVE_ELIGIBLE: ${{ steps.cache-policy.outputs.save }}
+        CACHE_STARTED: ${{ steps.cache-policy.outputs.started }}
         PLATFORM: ${{ runner.os }} / ${{ runner.arch }}
       run: |
         {
@@ -37,5 +81,10 @@ runs:
           printf 'Platform: %s\n\n' "$PLATFORM"
           printf 'Nix: `%s`\n\n' "$(nix --version)"
           printf 'Cache enabled: %s; restored: %s\n' "$CACHE_ENABLED" "${CACHE_HIT:-false}"
+          printf 'Cache key: `%s`; write eligible: %s (actual save is recorded in the post-action log)\n\n' "$CACHE_KEY" "${CACHE_SAVE_ELIGIBLE:-false}"
+          printf 'Restored key: `%s`; exact primary hit: %s\n\n' "$CACHE_RESTORED_KEY" "${CACHE_HIT_PRIMARY:-false}"
+          if [[ -n "$CACHE_STARTED" ]]; then
+            python3 -c 'import sys,time; print("Restore/policy seconds: %.3f\n" % (time.monotonic()-float(sys.argv[1])))' "$CACHE_STARTED"
+          fi
           printf 'Tested commit: `%s`\n' "$GITHUB_SHA"
         } >> "$GITHUB_STEP_SUMMARY"

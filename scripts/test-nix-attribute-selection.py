@@ -69,6 +69,11 @@ with tempfile.TemporaryDirectory() as directory:
 
         paths = [checks.check_derivation(system, name) for name in names]
         assert len(set(paths)) == 1
+        batch = checks.check_derivations(system, names)
+        assert [batch[name] for name in names] == paths
+        assert (
+            checks.check_derivations(system, [names[0], "missing"])["missing"] is None
+        )
         assert checks.check_derivation(system, names[0], source=base_source) == paths[0]
 
         (root / "version.txt").write_text("changed")
