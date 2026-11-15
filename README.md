@@ -81,14 +81,28 @@ Validation includes both `action.yml` and `action.yaml` beneath `actions/` and
 `.github/actions/`. Repositories containing only composite actions run the
 applicable action checks without invoking the workflow-only linter.
 
-`actions/setup-nix` installs the tested Determinate Nix version. Its optional
-`cache: 'true'` uses GitHub's repository-scoped cache. Give different build jobs
-different `cache-scope` values. Cache keys include platform, Nix version, lockfiles
-and commit; restore prefixes remain scoped to matching lockfiles. The action only
-saves on trusted default-branch pushes or dispatches, attempts to reduce the store
-to 2 GiB before saving, and never requests cache-purge permissions. GC cannot remove
-live roots, so the size target is not a hard quota. Measure restore and upload time
-before enabling it broadly. The cache is disabled by default.
+`actions/setup-nix` installs the tested Determinate Nix version. Store caching
+remains disabled by default. With `cache: 'true'`, `cache-write-mode: read-only`
+restores without saving. The compatible default `auto` retains writes only for
+trusted default-branch pushes/dispatches; explicit `seed` also permits a scheduled
+default-branch producer and rejects an untrusted event/ref. No input can authorize
+PR or merge-group writes. A seed and its consumers must share `cache-scope` and
+optional `cache-partition`; distinguish native shards, guide and static workloads.
+Keys use actual installed Nix runtime identity, OS/architecture, workload, relevant
+lockfiles and source revision. `cache-lockfiles` defaults to `**/flake.lock`.
+Optional `cache-restore-compatible: 'true'` permits an older lock's store within
+the same runtime/platform/workload; Nix still requires exact output identity.
+These v2 keys deliberately invalidate the earlier fixed-version namespace.
+
+Setup reports only effective provider origins and public-key names, never URL
+authentication, query strings or access tokens. Outputs expose exact/restored keys,
+primary/prefix hits and write eligibility. Restore/policy time appears in the job
+summary; actual save/transfer results remain in the cache action's post-job log.
+The shared action never enables purge permissions and retains the 2 GiB GC target;
+live roots can exceed it. Retain intended `--no-link` outputs with the flake action's
+`cache-roots` input or explicit Nix out-links before post-job GC. Measure useful
+retained paths, archive size and end-to-end transfer cost rather than assuming
+this target is a hard quota or that eligibility proves a successful upload.
 
 This action archives the Nix store. Enable it only for workloads whose entire
 store can be shared with contributors. Fork pull requests can read base-branch
@@ -236,13 +250,35 @@ On pull requests and merge groups, `actions/flake-checks` compares every current
 check derivation with the event's base commit. The action performs a bounded
 fetch when a shallow checkout does not contain that commit and marks its local
 Git flake URL as shallow for Nix evaluation. It skips a build only
-when both derivation paths are identical. New checks, changed checks, unavailable
+when both derivation paths are identical **and** configured owning GitHub Actions
+checks succeeded on that exact base. Set `base-success-checks` to a JSON array
+of the caller's required aggregate names and grant that job `checks: read`.
+Only the latest exact-head, successful, completed GitHub Actions checks count;
+failed, skipped, pending, missing, malformed or unavailable evidence rebuilds.
+The default empty list realizes current checks rather than trusting an arbitrary
+manual base. Syntax compatibility is retained, but callers must configure this
+evidence to opt into base-result reuse. New checks, changed checks, unavailable
 history, and base evaluation failures retain the conservative full-build
 behavior. The optional `base-revision` input overrides event discovery for manual
 dispatches. Each base check evaluation has a 60-second limit by default; a
 timeout builds the current check instead of waiting on historical evaluation.
 Set `base-eval-timeout` to zero only when complete comparison is worth an
 unbounded wait.
+
+`eval-batch-size` is opt-in (default 1, maximum 8). Small selected batches reuse
+one evaluator for current paths and one for base paths. Missing/throwing base
+members rebuild; a historical batch failure or timeout rebuilds its current
+members without per-member historical retries. Current batch failures fall back
+to the original isolated current evaluations, retaining per-check failure reports.
+The configured base timeout applies once per batch. Arbitrary Unicode attribute
+names retain JSON-decoded lookup; unselected checks are not forced.
+
+`cache-roots` accepts an absolute job-owned directory. Successful builds use
+hashed-name out-links there instead of `--no-link`, retaining all their outputs
+through post-job cache GC. This is artifact retention, not a substitute for a
+required native host runtime proof. Keep roots alive until the cache post-action
+finishes; do not reuse the directory across unrelated job owners.
+
 
 Workflow syntax and policy validation share one inventory, including nested
 composite actions using either `.yml` or `.yaml`. Explicit supported runner maps,

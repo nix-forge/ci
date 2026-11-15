@@ -13,6 +13,9 @@ inputs:
   base-revision:
     description: Optional base commit used to skip checks with unchanged derivations.
     default: ''
+  base-success-checks:
+    description: JSON array of required successful GitHub Actions aggregate names at the exact base; empty realizes every check.
+    default: '[]'
   base-eval-timeout:
     description: Seconds allowed for each base-revision check evaluation before building the current check; zero disables the limit.
     default: '60'
@@ -25,10 +28,21 @@ inputs:
   weights-file:
     description: Optional repository JSON file of estimated check costs for balanced partitions.
     default: ''
+  eval-batch-size:
+    description: Selected derivations per evaluator, from 1 to 8; one preserves isolated evaluation.
+    default: '1'
+  cache-roots:
+    description: Optional absolute directory retaining successful check outputs through post-job cache collection.
+    default: ''
+outputs:
+  base-validated:
+    description: Whether the owning Actions aggregate passed on the exact base commit.
+    value: ${{ steps.checks.outputs.base-validated }}
 runs:
   using: composite
   steps:
     - name: Discover and build native checks
+      id: checks
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -36,22 +50,31 @@ runs:
         CHECKS_OUTPUT: ${{ inputs.checks-output }}
         BUILD_CORES: ${{ inputs.cores }}
         BASE_REVISION: ${{ inputs.base-revision || github.event.inputs.base_sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        BASE_SUCCESS_CHECKS: ${{ inputs.base-success-checks }}
+        BASE_CHECK_TOKEN: ${{ github.token }}
         BASE_EVAL_TIMEOUT: ${{ inputs.base-eval-timeout }}
         PARTITION_COUNT: ${{ inputs.partition-count }}
         PARTITION_INDEX: ${{ inputs.partition-index }}
         WEIGHTS_FILE: ${{ inputs.weights-file }}
+        EVAL_BATCH_SIZE: ${{ inputs.eval-batch-size }}
+        CACHE_ROOTS: ${{ inputs.cache-roots }}
       run: |
         python3 "$ACTION_PATH/../../scripts/repository_inventory.py" partitions --materialize
         arguments=()
         if [[ -n "$WEIGHTS_FILE" ]]; then
           arguments+=(--weights "$WEIGHTS_FILE")
         fi
+        if [[ -n "$CACHE_ROOTS" ]]; then
+          arguments+=(--cache-roots "$CACHE_ROOTS")
+        fi
         python3 "$ACTION_PATH/../../scripts/run-flake-checks.py" \
           --system "$TARGET_SYSTEM" \
           --cores "$BUILD_CORES" \
           --output "$CHECKS_OUTPUT" \
           --base-revision "$BASE_REVISION" \
+          --base-success-checks "$BASE_SUCCESS_CHECKS" \
           --base-eval-timeout "$BASE_EVAL_TIMEOUT" \
           --partition-count "$PARTITION_COUNT" \
           --partition-index "$PARTITION_INDEX" \
+          --eval-batch-size "$EVAL_BATCH_SIZE" \
           "${arguments[@]}"
